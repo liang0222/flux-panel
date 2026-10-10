@@ -1,0 +1,39 @@
+# 统一换行符，避免 Windows 编辑器把源码改成 CRLF 后产生海量噪音改动。
+#
+# 背景：本仓库曾在 Windows 下被改成 CRLF，后果有两类，都已真实发生过：
+#   1) install.sh / panel_install.sh 变成 CRLF 后，Linux 上直接
+#      报 `syntax error near unexpected token '{\r'`，文档给的一行安装命令完全跑不起来；
+#   2) vite-frontend/src 下 35/38 个源文件变成 CRLF，eslint 累计报出 1.1 万条
+#      `Delete ␍` 噪音（真实错误被淹没，lint 事实上不可用）。
+#
+# `text=auto` 让 git 在提交时把文本文件规范化为 LF，检出时再按平台处理，
+# 从源头避免这类问题再次发生。
+* text=auto eol=lf
+
+# 必须保持 LF 的入口脚本：CRLF 会导致 Linux 上语法报错
+*.sh            text eol=lf
+*.sql           text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# 明确标记为二进制，禁止 Git 做任何换行/内容转换
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.ttc           binary
+*.ttf           binary
+*.woff          binary
+*.woff2         binary
+*.zip           binary
+*.jar           binary
+
+# Windows 批处理必须保持 CRLF
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# 避免在 diff / 语言统计里出现
+package-lock.json  -diff linguist-generated
+pnpm-lock.yaml     -diff linguist-generated
+yarn.lock          -diff linguist-generated

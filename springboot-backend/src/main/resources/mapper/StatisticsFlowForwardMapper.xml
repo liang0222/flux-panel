@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.admin.mapper.StatisticsFlowForwardMapper">
+
+    <!--
+      按端口（转发）聚合排行榜。
+      仅统计 start_time 之后产生的增量流量，并按 forward_id 汇总。
+      LEFT JOIN forward 是为了取端口/名称/状态；即使转发已被删除，仍能靠快照里冗余的
+      name / in_port 展示出来（此时 forward 侧字段为 NULL，用 COALESCE 兜底）。
+    -->
+    <select id="selectPortRanking" resultType="com.admin.common.dto.PortRankingDto">
+        SELECT
+            s.forward_id            AS forwardId,
+            COALESCE(MAX(f.name), MAX(s.name))          AS name,
+            COALESCE(MAX(f.in_port), MAX(s.in_port))    AS inPort,
+            COALESCE(MAX(f.out_port), MAX(s.out_port))  AS outPort,
+            MAX(s.user_id)          AS userId,
+            MAX(f.user_name)        AS userName,
+            COALESCE(MAX(f.tunnel_id), MAX(s.tunnel_id)) AS tunnelId,
+            MAX(t.name)             AS tunnelName,
+            SUM(s.flow)             AS flow,
+            MAX(f.status)           AS status,
+            SUM(s.flow)             AS inFlow,
+            0                       AS outFlow
+        FROM
+            statistics_flow_forward s
+        LEFT JOIN
+            forward f ON f.id = s.forward_id
+        LEFT JOIN
+            tunnel t ON t.id = COALESCE(f.tunnel_id, s.tunnel_id)
+        WHERE
+            s.created_time &gt;= #{startTime}
+            <if test="userId != null">
+                AND s.user_id = #{userId}
+            </if>
+        GROUP BY
+            s.forward_id
+        HAVING
+            SUM(s.flow) &gt; 0
+        ORDER BY
+            SUM(s.flow) DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 取指定转发最近一次快照的累计流量，用于下一周期计算增量 -->
+    <select id="selectLatestByForwardId" resultType="com.admin.entity.StatisticsFlowForward">
+        SELECT
+            id,
+            forward_id   AS forwardId,
+            user_id      AS userId,
+            name,
+            in_port      AS inPort,
+            out_port     AS outPort,
+            tunnel_id    AS tunnelId,
+            flow,
+            total_flow   AS totalFlow,
+            time,
+            created_time AS createdTime
+        FROM
+            statistics_flow_forward
+        WHERE
+            forward_id = #{forwardId}
+        ORDER BY
+            id DESC
+        LIMIT 1
+    </select>
+
+</mapper>

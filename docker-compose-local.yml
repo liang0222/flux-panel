@@ -1,0 +1,122 @@
+# ============================================================================
+# 本地构建版 Docker Compose
+# ----------------------------------------------------------------------------
+# 为什么需要这个文件：
+#   docker-compose-v4.yml 直接使用预编译镜像 liang0222/springboot-backend:1.4.4 和
+#   liang0222/vite-frontend:1.4.4。这些镜像由 CI 在「版本号（tag）尚不存在」时才
+#   构建 —— 因此每发一次版都必须把 tag 往上抬（现已从 1.4.3 抬到 1.4.4）。
+#   若沿用已存在的旧 tag，本地改的代码不会被构建进镜像，用官方 compose 跑起来
+#   看到的还是旧版本。
+#
+# 本文件在 v4 的基础上改为「从本地源码构建」，其余配置保持一致。
+#
+# 使用方式：
+#   1. 先准备 .env（与官方部署一致）：
+#        DB_NAME=gost
+#        DB_USER=gost
+#        DB_PASSWORD=改成你的密码
+#        JWT_SECRET=改成你的密钥
+#        BACKEND_PORT=6365
+#        FRONTEND_PORT=8080
+#   2. 构建并启动：
+#        docker compose -f docker-compose-local.yml up -d --build
+#   3. 查看日志：
+#        docker compose -f docker-compose-local.yml logs -f
+#
+# 注意：容器名与 v4 完全相同，两个 compose 文件不要同时启动。
+# ============================================================================
+
+services:
+  mysql:
+    image: mysql:5.7
+    container_name: gost-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 全新安装会自动执行 gost.sql（已包含 statistics_flow_forward 表）。
+      # 若数据库已存在（mysql_data 卷已有数据），该脚本不会重复执行，
+      # 此时需要手动执行迁移：
+      #   docker exec -i gost-mysql mysql -u$DB_USER -p$DB_PASSWORD $DB_NAME < migrate-port-ranking.sql
+      - ./gost.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max_connections=1000
+      --innodb_buffer_pool_size=256M
+    networks:
+      - gost-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 10s
+      retries: 10
+
+  backend:
+    build:
+      context: ./springboot-backend
+      dockerfile: Dockerfile
+    image: flux-panel/springboot-backend:local
+    container_name: springboot-backend
+    restart: unless-stopped
+    environment:
+      DB_HOST: mysql
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      LOG_DIR: /app/logs
+      JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
+    ports:
+      - "${BACKEND_PORT}:6365"
+    volumes:
+      - backend_logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - gost-network
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget --no-verbose --tries=1 --spider http://localhost:6365/flow/test || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  frontend:
+    build:
+      context: ./vite-frontend
+      dockerfile: Dockerfile
+    image: flux-panel/vite-frontend:local
+    container_name: vite-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - gost-network
+
+
+volumes:
+  mysql_data:
+    name: mysql_data
+    driver: local
+  backend_logs:
+    name: backend_logs
+    driver: local
+
+
+networks:
+  gost-network:
+    name: gost-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
