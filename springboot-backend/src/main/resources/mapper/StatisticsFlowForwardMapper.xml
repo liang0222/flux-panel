@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.admin.mapper.StatisticsFlowForwardMapper">
+
+    <!--
+      取指定转发最近一次的采集记录。
+      用 id DESC 而不是 created_time DESC：同一毫秒内批量写入时 id 更可靠。
+    -->
+    <select id="selectLatestByForwardId" resultType="com.admin.entity.StatisticsFlowForward">
+        SELECT
+            id,
+            forward_id   AS forwardId,
+            user_id      AS userId,
+            name,
+            in_port      AS inPort,
+            remote_addr  AS remoteAddr,
+            tunnel_id    AS tunnelId,
+            flow,
+            total_flow   AS totalFlow,
+            created_time AS createdTime
+        FROM statistics_flow_forward
+        WHERE forward_id = #{forwardId}
+        ORDER BY id DESC
+        LIMIT 1
+    </select>
+
+    <!--
+      端口流量排行榜：按 forward_id 汇总指定时间范围内的增量流量，降序排列。
+
+      名称/端口/落地目标优先取快照里冗余的字段，这样即使转发已被删除，
+      历史榜单仍能正常展示（不会因为 LEFT JOIN 不到而变成空白）。
+    -->
+    <select id="selectPortRanking" resultType="java.util.Map">
+        SELECT
+            s.forward_id                AS forwardId,
+            MAX(s.name)                 AS name,
+            MAX(s.in_port)              AS inPort,
+            MAX(s.remote_addr)          AS remoteAddr,
+            MAX(s.tunnel_id)            AS tunnelId,
+            MAX(s.user_id)              AS userId,
+            SUM(s.flow)                 AS flow,
+            MAX(s.total_flow)           AS totalFlow
+        FROM statistics_flow_forward s
+        WHERE s.created_time &gt;= #{startTime}
+        <if test="userId != null">
+            AND s.user_id = #{userId}
+        </if>
+        GROUP BY s.forward_id
+        HAVING SUM(s.flow) &gt; 0
+        ORDER BY SUM(s.flow) DESC
+        LIMIT #{limit}
+    </select>
+
+</mapper>
