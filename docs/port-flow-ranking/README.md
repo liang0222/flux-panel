@@ -12,7 +12,7 @@
 | 前端镜像 | `docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta` |
 | 一键安装 | `curl -L https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh` |
 | 服务器部署 | `deploy/docker-compose.registry.yml`（拉镜像）或 `deploy/docker-compose.yml`（源码构建） |
-| CI | GitHub Actions 已改为本仓库镜像并配置 secrets（`DOCKER_HUB_USERNAME`/`DOCKER_HUB_TOKEN`），推送到分支即自动构建 |
+| CI | GitHub Actions 已配置并跑通：推送分支自动构建 amd64 + arm64，产出 `latest` 与 `2.0.7-beta` |
 
 ## 文档索引
 

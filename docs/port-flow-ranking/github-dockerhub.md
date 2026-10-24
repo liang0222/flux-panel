@@ -460,7 +460,9 @@ docker compose pull && docker compose up -d
 
 ---
 
-## 15. （可选）让 GitHub Actions 自动构建镜像
+## 15. GitHub Actions 自动构建镜像（已配置并跑通）
+
+> 本仓库已完成：镜像名改为 `ahmadplayz721/*`、secrets 已配置、移除了自动发版 job；推送到 `feat/port-traffic-ranking` 或 `main` 会自动构建 amd64 + arm64 并推送 `latest` 与 `2.0.7-beta`。以下为原理说明。
 
 仓库里自带 `.github/workflows/docker-build.yml`，改三处才能用：
 

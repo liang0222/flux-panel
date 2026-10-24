@@ -15,7 +15,7 @@
 - 提交：5 个（后端 / 测试 / 前端 / 部署脚本 / 文档），最新 `b8e42ad`，工作区干净
 - Docker Hub：`ahmadplayz721/flux-panel-backend:2.0.7-beta`、`ahmadplayz721/flux-panel-frontend:2.0.7-beta`（2026-10-24 已推送）
 - 一键安装：`panel_install.sh` / `install.sh` 已改为本仓库地址；面板生成的节点安装命令也指向本仓库
-- CI：GitHub Actions 已改为本仓库镜像，secrets 已配置
+- CI：GitHub Actions 已跑通（run 40078633991），自动构建 amd64 + arm64 并推送 `latest`/`2.0.7-beta`
 - 改动规模：8 个修改 + 26 个新增（后端实体/Mapper/Service/Controller/DTO/定时任务、前端排行页、测试、`deploy/`、`docs/`、两个 `.dockerignore`）
 - 目标版本号未改动（仍为 `2.0.7-beta`），依赖未变
 
