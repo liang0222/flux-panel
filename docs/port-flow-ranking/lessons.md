@@ -245,6 +245,15 @@
     本次截图里的流量/端口/用户都是脚本造的，文档里明确写“模拟数据”，避免被当成线上真实数据。
     通用：是。
 
+45. **嵌套 heredoc 被 shell 提前截断，后半段被当成命令执行**
+    现象：用 `bash -c "python3 - <<EOF ..."` 改文档，脚本里又写了 `cat > .env <<EOF ... EOF`；内层 `EOF` 提前结束了外层 heredoc，剩余内容被 shell 执行（本次误跑了上游 `install.sh`、覆盖了仓库里的 `install.sh`、生成了一个 `docker-compose.yml`）。
+    解法：外层用唯一分隔符（`PYEOF` / `DOC`）或**把脚本写成文件再执行**；执行前用 `grep -n '^EOF$' 文件` 自检。
+    通用：是。
+
+46. **误执行外部脚本后的恢复流程**
+    先 `git status` 找被覆盖/新增的文件 → `git checkout -- <file>` 还原、`rm` 掉生成物 → 检查常驻服务是否被重启（`ps -o lstart -p <pid>`、`systemctl status <svc>`）→ 确认配置 mtime 未变。
+    通用：是。
+
 ## J. 下次的 30 分钟快速通道
 
 1. 钉输入（仓库/tag/单元/口径）→ clone + 建分支（5 分钟）
