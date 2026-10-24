@@ -24,29 +24,99 @@
 - 提供灵活的转发策略配置，适用于多种网络场景
 
 
+## 本仓库改动
+
+本仓库是 `flux-panel` 的改动版（分支 `feat/port-traffic-ranking`），在保留原有功能的基础上新增：
+
+- **端口流量排行**：每 5 分钟采集各端口转发流量，支持今天 / 近 3 天 / 近 7 天 / 近 30 天排行，历史保留 31 天。
+- **仪表盘实时速率**：基于节点上报增量的 10 秒滑动窗口，展示总速率、上下行占比、最忙端口与最高用户，2 秒刷新。
+
+![实时速率](docs/port-flow-ranking/dashboard-realtime-card.png)
+
+![端口流量排行](docs/port-flow-ranking/ranking-today.png)
+
+> 实现说明、测试与踩坑记录见 [docs/port-flow-ranking](docs/port-flow-ranking/README.md)。
+
 ## 部署流程
----
-### Docker Compose部署
-#### 快速部署
-面板端(稳定版)：
+
+### 面板端（Docker Compose，约 3 分钟）
+
+> 使用本仓库发布的镜像：`docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta`、`docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta`（amd64）。
+
+服务器上执行（需要 Docker 与 Compose 插件）：
+
 ```bash
-curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
+mkdir -p /opt/flux-panel && cd /opt/flux-panel
+
+cat > .env <<ENVFILE
+JWT_SECRET=$(openssl rand -hex 16)
+FRONTEND_PORT=6366
+BACKEND_PORT=6365
+ENVFILE
+
+cat > docker-compose.yml <<COMPOSEFILE
+services:
+  backend:
+    image: docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta
+    container_name: springboot-backend
+    restart: unless-stopped
+    environment:
+      DB_PATH: /app/data/gost.db
+      JWT_SECRET: ${JWT_SECRET}
+      LOG_DIR: /app/logs
+      JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
+    ports:
+      - "${BACKEND_PORT:-6365}:6365"
+    volumes:
+      - sqlite_data:/app/data
+      - backend_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget --no-verbose --tries=1 --spider http://localhost:6365/flow/test || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  frontend:
+    image: docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta
+    container_name: vite-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-6366}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  sqlite_data:
+    name: sqlite_data
+  backend_logs:
+    name: backend_logs
+COMPOSEFILE
+
+docker compose pull
+docker compose up -d
+docker compose ps
 ```
-节点端(稳定版)：
+
+访问 `http://服务器IP:6366`，默认账号见下方。
+
+安全组 / 防火墙需要放行：
+
+- `6366`：面板网页
+- `6365`：节点上报流量（节点服务器需要能访问）
+
+### 节点端
+
+节点二进制与上游 `2.0.7-beta` 一致，直接使用上游脚本安装：
+
 ```bash
 curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
-
 ```
 
-面板端(开发版)：
-```bash
-curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/beta/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
-```
-节点端(开发版)：
-```bash
-curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/beta/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+安装时按提示填写「面板后端地址」和「节点密钥」（可在面板「节点监控 → 添加节点」里获取；面板也会生成带 `-a`/`-s` 参数的完整命令，复制执行即可）。
 
-```
+> 想完全自托管节点脚本：把 `install.sh` 里的下载地址换成你自己仓库的 Releases，并上传对应的 `gost-amd64` / `gost-arm64` 二进制。
 
 #### 默认管理员账号
 
