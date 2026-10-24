@@ -143,6 +143,20 @@ get_config_params() {
       exit 1
     fi
   fi
+
+  # 规范化：去掉 http(s)://、路径和末尾斜杠，只保留 host:port
+  SERVER_ADDR="${SERVER_ADDR#http://}"
+  SERVER_ADDR="${SERVER_ADDR#https://}"
+  SERVER_ADDR="${SERVER_ADDR%%/*}"
+  SERVER_ADDR="${SERVER_ADDR%/}"
+
+  # 校验格式：IPv4/域名:端口 或 [IPv6]:端口
+  if ! [[ "$SERVER_ADDR" =~ ^(\[[^]]+\]|[^:[:space:]]+):[0-9]+$ ]]; then
+    echo "❌ 面板后端地址格式错误: $SERVER_ADDR"
+    echo "   正确格式是 IP:端口，例如 1.2.3.4:6365"
+    echo "   不要带 http://、https://、路径或末尾斜杠；端口是后端端口，不是面板网页端口"
+    exit 1
+  fi
 }
 
 # 解析命令行参数
@@ -242,6 +256,22 @@ EOF
   else
     echo "❌ flux_agent服务启动失败，请执行以下命令查看日志："
     echo "journalctl -u flux_agent -f"
+    return 1
+  fi
+
+  # 连通性自检：节点必须能访问面板后端的 /flow/test
+  echo "🔍 测试面板连通性: http://$SERVER_ADDR/flow/test"
+  HTTP_CODE=$(curl -s -m 6 -o /dev/null -w "%{http_code}" "http://$SERVER_ADDR/flow/test" || true)
+  if [ "$HTTP_CODE" = "200" ]; then
+    echo "✅ 面板可达，节点会在几秒内上线（面板「节点监控」里刷新查看）"
+  else
+    echo "⚠️ 无法连接面板后端：http://$SERVER_ADDR/flow/test （返回: ${HTTP_CODE:-超时}）"
+    echo "   请依次检查："
+    echo "   1) 面板服务器安全组/防火墙是否放行该端口（默认 6365/TCP，节点→面板方向）"
+    echo "   2) 地址是否为 IP:端口（不能带 http://，不要填面板网页端口 6366）"
+    echo "   3) 面板容器是否运行：docker compose ps（springboot-backend 应为 healthy）"
+    echo "   4) 是否套了 CDN/反向代理（节点连接不支持）"
+    echo "   查看节点日志：journalctl -u flux_agent -n 50 --no-pager"
   fi
 }
 

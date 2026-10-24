@@ -61,6 +61,15 @@ curl -L https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/p
 
 > 也可以在面板里直接复制生成的安装命令，它会指向本仓库的 `install.sh`。
 
+**节点连不上？** 按顺序检查：
+
+1. 面板服务器安全组/防火墙放行 **后端端口（默认 6365/TCP）**，节点要能访问它；只开 6366（网页）不够。
+2. 「面板后端地址」必须是 `公网IP:6365`：不要带 `http://`、不要填网页端口、不要套 CDN。
+3. 在节点服务器执行 `curl http://面板IP:6365/flow/test`，应返回 `test`。
+4. 节点上查看服务：`systemctl status flux_agent`、`journalctl -u flux_agent -n 50 --no-pager`。
+5. 面板上查看日志：`docker logs springboot-backend | grep -E "节点|secret"`。
+6. 修改地址后重新安装：`./install.sh -a 面板IP:6365 -s 节点密钥`（安装脚本会自动做格式校验和连通性检测）。
+
 ### 手动部署（可选，等价于上面脚本做的事）
 
 > 使用本仓库发布的镜像：`docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta`、`docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta`（amd64）。

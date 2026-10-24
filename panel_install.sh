@@ -209,6 +209,7 @@ EOF
 
   echo "🎉 部署完成"
   echo "🌐 访问地址: http://服务器IP:$FRONTEND_PORT"
+  echo "🔌 节点对接地址: 公网IP:$BACKEND_PORT（需在安全组/防火墙放行 TCP $BACKEND_PORT）"
   echo "📖 部署完成后请阅读下使用文档，求求了啊，不要上去就是一顿操作"
   echo "📚 文档地址: https://github.com/liang0222/flux-panel"
   echo "💡 默认管理员账号: admin_user / admin_user"
