@@ -10,7 +10,9 @@
 | Docker Hub | `ahmadplayz721` |
 | 后端镜像 | `docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta` |
 | 前端镜像 | `docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta` |
+| 一键安装 | `curl -L https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh` |
 | 服务器部署 | `deploy/docker-compose.registry.yml`（拉镜像）或 `deploy/docker-compose.yml`（源码构建） |
+| CI | GitHub Actions 已改为本仓库镜像并配置 secrets（`DOCKER_HUB_USERNAME`/`DOCKER_HUB_TOKEN`），推送到分支即自动构建 |
 
 ## 文档索引
 
@@ -27,13 +29,14 @@
 
 > 截图均为真实 Docker 栈 + Playwright 渲染，**流量数据是脚本模拟的**，不是真实用户数据。
 
-## 当前状态（2026-10-24）
+## 当前状态（2026-10-24 16:40）
 
 - 功能：端口转发流量排行（5 分钟采集 / 区间聚合 / 管理员页） + 仪表盘实时速率（10 秒内存窗口 / 2 秒轮询 / 按角色隔离）。
 - 验证：后端 47 个测试全绿；前端 `npm run build` 通过；真实 Docker 部署、接口、重启、删转发、离线镜像 `save/load` 均验证过；页面已截图。
 - 代码：已提交 5 个 commit 并推送到 GitHub（`liang0222/flux-panel`，最新 `b8e42ad`），工作区干净。
 - 镜像：已推送到 Docker Hub（`ahmadplayz721`，tag `2.0.7-beta`）。
-- 部署：`deploy/` 下有拉镜像（registry）、源码构建、离线 tar 三种方式。
+- 部署：`deploy/` 下有拉镜像（registry）、源码构建、离线 tar 三种方式；仓库根目录的 `panel_install.sh` / `install.sh` 已改为本仓库地址。
+- CI：`.github/workflows/docker-build.yml` 已改为构建 `ahmadplayz721/*` 镜像，secrets 已配置，推送到 `feat/port-traffic-ranking` 或 `main` 自动构建。
 
 ## 下一步
 

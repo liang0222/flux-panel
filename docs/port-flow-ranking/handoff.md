@@ -14,6 +14,8 @@
 - GitHub：https://github.com/liang0222/flux-panel （`origin` 已指向它，`upstream` 保留原作者）
 - 提交：5 个（后端 / 测试 / 前端 / 部署脚本 / 文档），最新 `b8e42ad`，工作区干净
 - Docker Hub：`ahmadplayz721/flux-panel-backend:2.0.7-beta`、`ahmadplayz721/flux-panel-frontend:2.0.7-beta`（2026-10-24 已推送）
+- 一键安装：`panel_install.sh` / `install.sh` 已改为本仓库地址；面板生成的节点安装命令也指向本仓库
+- CI：GitHub Actions 已改为本仓库镜像，secrets 已配置
 - 改动规模：8 个修改 + 26 个新增（后端实体/Mapper/Service/Controller/DTO/定时任务、前端排行页、测试、`deploy/`、`docs/`、两个 `.dockerignore`）
 - 目标版本号未改动（仍为 `2.0.7-beta`），依赖未变
 
@@ -143,8 +145,8 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 
 ### 必做（交给用户决定）
 
-1. ~~提交代码~~ 已完成（5 个提交已推送到 GitHub）。
-2. **服务器部署**：用 `deploy/docker-compose.registry.yml` 拉取 Docker Hub 镜像启动，或参考 `github-dockerhub.md` 第 10 步起。
+1. ~~提交代码~~ 已完成（全部提交已推送到 GitHub，最新 `a87ca57`）。
+2. **服务器部署**：直接跑 README 里的「面板端（开发版）」命令，或用 `deploy/docker-compose.registry.yml` 拉取镜像启动。
 3. **视觉走查补充**：已用 Playwright 在真实 Docker 栈上截了暗色「仪表盘实时速率」和「流量排行」（见截图一节），仍建议补看**浅色主题、窄屏/手机布局、空态与错误态、按钮交互**。
 4. **GitHub Actions（可选）**：工作流里的镜像名仍是 `bqlpfy/*`，要自动构建需改成 `ahmadplayz721/*` 并配 secrets，见 `github-dockerhub.md` 第 15 节。
 
