@@ -71,7 +71,20 @@ docker buildx build --platform linux/amd64 -t docker.io/<USER>/flux-panel-backen
 docker buildx build --platform linux/amd64 -t docker.io/<USER>/flux-panel-frontend:2.0.7-beta --push ./vite-frontend
 ```
 
-然后把 [deploy/docker-compose.yml](../../deploy/docker-compose.yml) 里的 `build:` 换成 `image:`（或直接用官方 compose 改镜像名）。CI 的注意事项见第 6.6 节。
+本项目已经构建并推送过一份可直接用的镜像（2026-10-24）：
+
+- `docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta`
+- `docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta`
+
+服务器侧直接用 [deploy/docker-compose.registry.yml](../../deploy/docker-compose.registry.yml)（无 `build:`，只拉镜像）：
+
+```bash
+cd deploy && cp .env.example .env    # 填 JWT_SECRET
+docker compose -f docker-compose.registry.yml pull
+docker compose -f docker-compose.registry.yml up -d
+```
+
+要自己重新推送：`cd deploy && ./push-images.sh`（默认用户 `ahmadplayz721`、版本 `2.0.7-beta`、amd64，可用 `VERSION=` / `PLATFORM=` 覆盖）。CI 的注意事项见第 6.6 节。
 
 ## 4. 方式 C：不用 Docker（jar + nginx）
 

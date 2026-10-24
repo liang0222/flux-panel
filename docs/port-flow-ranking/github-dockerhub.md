@@ -3,6 +3,20 @@
 > 假设你从没做过这件事。按顺序照做即可，每条命令都说明「做什么、成功长什么样」。
 > 中途卡住：把**完整报错**复制给我，或对照最后一节「常见报错」。
 
+## 你的实际参数（2026-10-24 已确认并执行）
+
+| 项 | 值 |
+| --- | --- |
+| GitHub 用户名 | `liang0222` |
+| 代码仓库 | https://github.com/liang0222/flux-panel |
+| 已推送分支 | `feat/port-traffic-ranking`（5 个提交，最新 `b8e42ad`） |
+| Docker Hub 用户名 | `ahmadplayz721` |
+| 后端镜像 | `docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta` |
+| 前端镜像 | `docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta` |
+| 镜像状态 | **已推送成功**（2026-10-24），服务器可直接 pull |
+
+> 当前进度：第 3~9 步（提交、建仓库、推代码、构建并推送镜像）都已完成。服务器部署从**第 10 步**开始即可。
+
 ---
 
 ## 0. 先搞懂 4 个东西（30 秒）
@@ -146,11 +160,11 @@ git log --oneline -5       # 应该看到 5 条提交
 2. **Repository name**：填 `flux-panel`
 3. **不要勾** "Add a README file"、"Add .gitignore"、"Choose a license"（勾了会导致第一次推送冲突）
 4. 点 **Create repository**
-5. 新页面会显示仓库地址，例如 `https://github.com/你的用户名/flux-panel.git`
+5. 新页面会显示仓库地址，例如 `https://github.com/liang0222/flux-panel.git`
 
 ---
 
-## 5. 把本地代码连到你的仓库并推送
+## 5. 把本地代码连到你的仓库并推送（本次已完成，可跳过）
 
 ### 5.1 换 remote
 
@@ -161,12 +175,12 @@ git remote -v
 # 应该看到 origin  https://github.com/bqlpfy/flux-panel.git
 
 git remote rename origin upstream
-git remote add origin https://github.com/你的用户名/flux-panel.git
+git remote add origin https://github.com/liang0222/flux-panel.git
 git remote -v
 # 现在 origin=你的仓库，upstream=原作者
 ```
 
-> 如果提示 `remote origin already exists`：改成 `git remote set-url origin https://github.com/你的用户名/flux-panel.git`
+> 如果提示 `remote origin already exists`：改成 `git remote set-url origin https://github.com/liang0222/flux-panel.git`
 
 ### 5.2 创建访问 Token（代替密码）
 
@@ -209,7 +223,7 @@ git push -u origin feat/port-traffic-ranking
 
 ## 6. 注册 Docker Hub 并建仓库
 
-1. https://hub.docker.com 注册（用户名记下来，**只能小写**，下文假设 `zhangsan`）
+1. https://hub.docker.com 注册（用户名记下来，**只能小写**，下文假设 `ahmadplayz721`）
 2. 登录后点 **Create repository**
 3. Name 填 `flux-panel-backend`，Visibility 选 **Public**，Create
 4. 再建一个 `flux-panel-frontend`，同样 Public
@@ -225,7 +239,7 @@ git push -u origin feat/port-traffic-ranking
 ## 7. 登录 Docker（在本机）
 
 ```bash
-docker login -u zhangsan
+docker login -u ahmadplayz721
 # Password: 粘贴刚才的 Token
 ```
 
@@ -233,21 +247,21 @@ docker login -u zhangsan
 
 ---
 
-## 8. 构建镜像
+## 8. 构建镜像（本次已完成，可跳过）
 
 **必须在项目根目录**（有 `springboot-backend` 和 `vite-frontend` 两个文件夹的地方）执行：
 
 ```bash
 cd /root/v2.0.7-beta
 
-docker build -t zhangsan/flux-panel-backend:2.0.7-beta  ./springboot-backend
-docker build -t zhangsan/flux-panel-frontend:2.0.7-beta ./vite-frontend
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta  ./springboot-backend
+docker build -t ahmadplayz721/flux-panel-frontend:2.0.7-beta ./vite-frontend
 ```
 
 你会看到很多下载和编译日志，**第一次 5~15 分钟**，最后出现：
 
 ```
-naming to docker.io/zhangsan/flux-panel-backend:2.0.7-beta done
+naming to docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta done
 ```
 
 就是成功。检查：
@@ -261,14 +275,14 @@ docker images | grep flux-panel
 
 ---
 
-## 9. 推送镜像到 Docker Hub
+## 9. 推送镜像到 Docker Hub（本次已完成，可跳过）
 
 ```bash
-docker push zhangsan/flux-panel-backend:2.0.7-beta
-docker push zhangsan/flux-panel-frontend:2.0.7-beta
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+docker push ahmadplayz721/flux-panel-frontend:2.0.7-beta
 ```
 
-上传量约 700MB，看网速。完成后去 https://hub.docker.com/u/zhangsan 能看到两个仓库和 tag `2.0.7-beta`。
+上传量约 700MB，看网速。完成后去 https://hub.docker.com/u/ahmadplayz721 能看到两个仓库和 tag `2.0.7-beta`。
 
 ---
 
@@ -318,12 +332,12 @@ BACKEND_PORT=6365
 nano docker-compose.yml
 ```
 
-粘贴下面全部内容（把 `zhangsan` 换成你的 Docker Hub 用户名）：
+粘贴下面全部内容（已按 `ahmadplayz721` 填好）：
 
 ```yaml
 services:
   backend:
-    image: docker.io/zhangsan/flux-panel-backend:2.0.7-beta
+    image: docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta
     container_name: springboot-backend
     restart: unless-stopped
     environment:
@@ -347,7 +361,7 @@ services:
       start_period: 60s
 
   frontend:
-    image: docker.io/zhangsan/flux-panel-frontend:2.0.7-beta
+    image: docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta
     container_name: vite-frontend
     restart: unless-stopped
     ports:
@@ -431,8 +445,8 @@ docker exec springboot-backend sqlite3 /app/data/gost.db ".tables"
 git add -A && git commit -m "fix: ..." && git push
 
 # 本机：构建并推新版本镜像（版本号自己递增）
-docker build -t zhangsan/flux-panel-backend:2.0.8-beta ./springboot-backend
-docker push zhangsan/flux-panel-backend:2.0.8-beta
+docker build -t ahmadplayz721/flux-panel-backend:2.0.8-beta ./springboot-backend
+docker push ahmadplayz721/flux-panel-backend:2.0.8-beta
 # 前端同理
 
 # 服务器：改 compose 里的版本号 → 拉取 → 重启
@@ -450,9 +464,9 @@ docker compose pull && docker compose up -d
 
 仓库里自带 `.github/workflows/docker-build.yml`，改三处才能用：
 
-1. 把 `bqlpfy/springboot-backend`、`bqlpfy/vite-frontend` 改成 `zhangsan/...`
+1. 把 `bqlpfy/springboot-backend`、`bqlpfy/vite-frontend` 改成 `ahmadplayz721/...`
 2. 仓库 **Settings → Secrets and variables → Actions** 添加：
-   - `DOCKER_HUB_USERNAME` = `zhangsan`
+   - `DOCKER_HUB_USERNAME` = `ahmadplayz721`
    - `DOCKER_HUB_TOKEN` = 你生成的 Token
 3. 已推过 `2.0.7-beta` tag 的话，先删掉 `create-release` 这个 job，或把 `env.VERSION` 改成 `2.0.8-beta`
 
@@ -469,7 +483,7 @@ docker compose pull && docker compose up -d
 | `Authentication failed` | 用了登录密码 | 密码位置填 Token |
 | `remote origin already exists` | 已存在 origin | `git remote set-url origin 新地址` |
 | `Repository not found` | 地址/用户名写错 | 核对后重试 |
-| `denied: requested access to the resource is denied` | 镜像名前缀不是你的用户名，或没登录 | 改成 `你的用户名/...`，重新 `docker login` |
+| `denied: requested access to the resource is denied` | 镜像名前缀不是你的用户名，或没登录 | 改成 `ahmadplayz721/...`，重新 `docker login` |
 | `unauthorized: authentication required` | 没登录或 Token 无写权限 | 重新生成 Read & Write Token |
 | `pull access denied` | 仓库是私有 | Docker Hub 里改成 Public，或服务器先登录 |
 | `exec format error` | 服务器是 arm64，镜像是 amd64 | 用 buildx 构建 `linux/arm64` |

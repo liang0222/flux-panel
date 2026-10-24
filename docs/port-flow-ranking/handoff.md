@@ -5,13 +5,16 @@
 
 ## 一句话现状
 
-两期功能都已实现并通过验证：**端口流量排行** + **仪表盘实时速率**（47 个后端测试、前端构建、真实 Docker 部署与页面渲染截图），**代码在工作区未提交**；剩余工作是提交、可选体验补充和上线观察。
+两期功能都已实现并验证：**端口流量排行** + **仪表盘实时速率**（47 个后端测试、前端构建、真实 Docker 部署与页面渲染截图）。代码已提交并推送到 **GitHub `liang0222/flux-panel`**（5 个提交，最新 `b8e42ad`），镜像已推送到 **Docker Hub `ahmadplayz721`**（`2.0.7-beta`）；剩余工作只有服务器部署、可选的体验补充和上线观察。
 
 ## 代码位置与状态
 
 - 仓库：`/root/v2.0.7-beta`（clone 自 `https://github.com/bqlpfy/flux-panel`）
-- 分支：`feat/port-traffic-ranking`，基于 tag **`2.0.7-beta`**（`761db18`），**未提交**
-- 改动规模：8 个修改（`.gitignore`、`pom.xml`、`FlowController`、`schema.sql`、`App.tsx`、`api/index.ts`、`admin.tsx`、`dashboard.tsx`）+ 26 个新增（后端实体/Mapper/Service/Controller/DTO/定时任务、前端排行页、测试、`deploy/`、`docs/`、两个 `.dockerignore`）
+- 分支：`feat/port-traffic-ranking`，基于 tag **`2.0.7-beta`**（`761db18`）
+- GitHub：https://github.com/liang0222/flux-panel （`origin` 已指向它，`upstream` 保留原作者）
+- 提交：5 个（后端 / 测试 / 前端 / 部署脚本 / 文档），最新 `b8e42ad`，工作区干净
+- Docker Hub：`ahmadplayz721/flux-panel-backend:2.0.7-beta`、`ahmadplayz721/flux-panel-frontend:2.0.7-beta`（2026-10-24 已推送）
+- 改动规模：8 个修改 + 26 个新增（后端实体/Mapper/Service/Controller/DTO/定时任务、前端排行页、测试、`deploy/`、`docs/`、两个 `.dockerignore`）
 - 目标版本号未改动（仍为 `2.0.7-beta`），依赖未变
 
 ## 环境（本机已就绪，重开容器需重做）
@@ -66,6 +69,8 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 | `deploy/.env.example` | JWT_SECRET / 前后端端口模板 |
 | `deploy/rebuild.sh` | 一键重建并重启 |
 | `deploy/export-images.sh` | 构建并导出 201MB 镜像 tar，服务器 `docker load` 即可 |
+| `deploy/docker-compose.registry.yml` | 直接用 Docker Hub 镜像部署（无 build，已填 `ahmadplayz721/...:2.0.7-beta`） |
+| `deploy/push-images.sh` | 构建并推送镜像到 Docker Hub（默认 `ahmadplayz721` / `2.0.7-beta`） |
 | `springboot-backend/.dockerignore`、`vite-frontend/.dockerignore` | 排除 `target/`、`node_modules/`、`dist/` |
 | `.gitignore`（改） | 忽略 `deploy/*.tar` |
 
@@ -138,9 +143,10 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 
 ### 必做（交给用户决定）
 
-1. **提交代码**：建议拆 3~4 个提交（后端实现 / 测试 / 前端 / 部署脚本 / 文档），注意 `docs/port-flow-ranking/` 是工作笔记，可移出仓库或不提交。提交时不要漏掉 `deploy/`、两个 `.dockerignore`、`.gitignore` 的改动。
-2. **视觉走查补充**：已用 Playwright 在真实 Docker 栈上截了暗色「仪表盘实时速率」和「流量排行」（见截图一节），仍建议补看**浅色主题、窄屏/手机布局、空态与错误态、按钮交互**。
-3. **推送到自己的 GitHub（可选）**：仅备份/分发需要；部署不依赖它。注意 CI 的镜像名与 secrets，见 `deploy-and-publish.md` 第 6 节。
+1. ~~提交代码~~ 已完成（5 个提交已推送到 GitHub）。
+2. **服务器部署**：用 `deploy/docker-compose.registry.yml` 拉取 Docker Hub 镜像启动，或参考 `github-dockerhub.md` 第 10 步起。
+3. **视觉走查补充**：已用 Playwright 在真实 Docker 栈上截了暗色「仪表盘实时速率」和「流量排行」（见截图一节），仍建议补看**浅色主题、窄屏/手机布局、空态与错误态、按钮交互**。
+4. **GitHub Actions（可选）**：工作流里的镜像名仍是 `bqlpfy/*`，要自动构建需改成 `ahmadplayz721/*` 并配 secrets，见 `github-dockerhub.md` 第 15 节。
 
 ### 可选增强（按需）
 
