@@ -24,6 +24,31 @@ CREATE TABLE IF NOT EXISTS forward_port (
   port INTEGER NOT NULL
 );
 
+-- 端口转发流量采集记录（每 5 分钟一条，按转发端口维度保存计数器快照与增量）
+CREATE TABLE IF NOT EXISTS forward_flow_statistics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  forward_id INTEGER NOT NULL,
+  forward_name VARCHAR(100),
+  port INTEGER,
+  ports VARCHAR(200),
+  node_id INTEGER,
+  tunnel_id INTEGER,
+  user_id INTEGER,
+  user_name VARCHAR(100),
+  in_flow INTEGER NOT NULL DEFAULT 0,
+  out_flow INTEGER NOT NULL DEFAULT 0,
+  in_flow_delta INTEGER NOT NULL DEFAULT 0,
+  out_flow_delta INTEGER NOT NULL DEFAULT 0,
+  flow INTEGER NOT NULL DEFAULT 0,
+  total_flow INTEGER NOT NULL DEFAULT 0,
+  reset_flag INTEGER NOT NULL DEFAULT 0,
+  created_time INTEGER NOT NULL,
+  time VARCHAR(100)
+);
+
+CREATE INDEX IF NOT EXISTS idx_forward_flow_statistics_time ON forward_flow_statistics (created_time);
+CREATE INDEX IF NOT EXISTS idx_forward_flow_statistics_forward ON forward_flow_statistics (forward_id, created_time);
+
 CREATE TABLE IF NOT EXISTS node (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name VARCHAR(100) NOT NULL,

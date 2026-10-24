@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.admin.mapper.ForwardFlowStatisticsMapper">
+
+    <!-- 每个转发最新一条采集记录（计算增量、展示已删除转发的历史信息） -->
+    <select id="selectLatestByForwardIds" resultType="com.admin.entity.ForwardFlowStatistics">
+        SELECT
+            *
+        FROM
+            forward_flow_statistics
+        WHERE
+            id IN (
+                SELECT MAX(id)
+                FROM forward_flow_statistics
+                WHERE forward_id IN
+                <foreach collection="forwardIds" item="forwardId" open="(" separator="," close=")">
+                    #{forwardId}
+                </foreach>
+                GROUP BY forward_id
+            )
+    </select>
+
+    <!-- 按转发聚合区间内新增流量（增量入库，直接求和不产生负值/重复累计） -->
+    <select id="selectFlowSumsByRange" resultType="com.admin.common.dto.ForwardFlowAggregateDto">
+        SELECT
+            forward_id AS forwardId,
+            SUM(in_flow_delta) AS inFlow,
+            SUM(out_flow_delta) AS outFlow,
+            SUM(flow) AS totalFlow,
+            COUNT(1) AS sampleCount,
+            MIN(created_time) AS firstTime,
+            MAX(created_time) AS lastTime
+        FROM
+            forward_flow_statistics
+        WHERE
+            created_time &gt;= #{startTime}
+            AND created_time &lt;= #{endTime}
+        GROUP BY
+            forward_id
+    </select>
+
+    <!-- 最近一次采集时间 -->
+    <select id="selectLastCollectTime" resultType="java.lang.Long">
+        SELECT
+            MAX(created_time)
+        FROM
+            forward_flow_statistics
+    </select>
+
+    <!-- 清理超过保留期的采集记录 -->
+    <delete id="deleteBefore">
+        DELETE FROM forward_flow_statistics WHERE created_time &lt; #{cutoffTime}
+    </delete>
+
+</mapper>

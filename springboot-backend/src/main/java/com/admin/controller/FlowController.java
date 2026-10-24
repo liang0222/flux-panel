@@ -6,6 +6,7 @@ import com.admin.common.dto.GostConfigDto;
 import com.admin.common.task.CheckGostConfigAsync;
 import com.admin.common.utils.AESCrypto;
 import com.admin.common.utils.GostUtil;
+import com.admin.common.utils.RealtimeFlowTracker;
 import com.admin.entity.*;
 import com.admin.service.ChainTunnelService;
 import com.alibaba.fastjson.JSON;
@@ -69,6 +70,9 @@ public class FlowController extends BaseController {
     @Resource
     @Lazy
     ChainTunnelService chainTunnelService;
+
+    @Resource
+    RealtimeFlowTracker realtimeFlowTracker;
 
     /**
      * 加密消息包装器
@@ -239,6 +243,9 @@ public class FlowController extends BaseController {
             flowDataList.setU(newU.longValue() * tunnel.getFlow());
         }
 
+        // 记录实时速率（内存滑动窗口，不落库）
+        recordRealtimeRate(forwardId, userId, forward, flowDataList);
+
         // 先更新所有流量统计 - 确保流量数据的一致性
         updateForwardFlow(forwardId, flowDataList);
         updateUserFlow(userId, flowDataList);
@@ -251,6 +258,26 @@ public class FlowController extends BaseController {
             checkUserTunnelRelatedLimits(userTunnelId, name, userId);
         }
 
+    }
+
+    /**
+     * 记录实时速率：使用已按倍率/计费换算后的增量，与流量累计口径一致
+     */
+    private void recordRealtimeRate(String forwardId, String userId, Forward forward, FlowDto flowData) {
+        try {
+            long inBytes = flowData.getD() == null ? 0L : flowData.getD();
+            long outBytes = flowData.getU() == null ? 0L : flowData.getU();
+            realtimeFlowTracker.record(
+                    Long.parseLong(forwardId),
+                    Integer.parseInt(userId),
+                    forward == null ? null : forward.getUserName(),
+                    inBytes,
+                    outBytes
+            );
+        } catch (NumberFormatException e) {
+            // 服务名异常时不影响正常流量统计
+            log.debug("服务名解析失败，跳过实时速率统计: {}", flowData.getN());
+        }
     }
 
     private void checkUserRelatedLimits(String userId, String name) {

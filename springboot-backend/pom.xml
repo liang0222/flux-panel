@@ -141,6 +141,18 @@
 
     <build>
         <plugins>
+            <!-- 测试运行所需的环境变量：生产部署时由 docker-compose / 安装脚本注入同名变量 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <environmentVariables>
+                        <JWT_SECRET>test-jwt-secret</JWT_SECRET>
+                        <LOG_DIR>${project.build.directory}/test-logs</LOG_DIR>
+                        <DB_PATH>${project.build.directory}/test-db.sqlite</DB_PATH>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
