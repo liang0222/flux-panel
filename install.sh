@@ -19,6 +19,7 @@ get_architecture() {
 # 构建下载地址
 build_download_url() {
     local ARCH=$(get_architecture)
+    # 节点二进制与上游 2.0.7-beta 完全一致；如需完全自托管，可改为自己的 Releases 地址
     echo "https://github.com/bqlpfy/flux-panel/releases/download/2.0.7-beta/gost-${ARCH}"
 }
 

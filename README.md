@@ -39,7 +39,29 @@
 
 ## 部署流程
 
-### 面板端（Docker Compose，约 3 分钟）
+> 如果 `raw.githubusercontent.com` 访问不了（国内常见），把命令里的 `https://raw.githubusercontent.com` 换成 `https://ghfast.top/https://raw.githubusercontent.com` 即可。
+
+### 面板端（开发版）
+
+```bash
+curl -L https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
+```
+
+脚本会下载本仓库的 `docker-compose-v4.yml` / `docker-compose-v6.yml`（使用 `ahmadplayz721/flux-panel-*` 镜像），
+按提示输入前端/后端端口后自动启动。默认前端 `6366`、后端 `6365`。
+
+### 节点端（开发版）
+
+```bash
+curl -L https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+```
+
+按提示填写「面板后端地址」（`公网IP:6365`）和「节点密钥」（面板「节点监控 → 添加节点」里获取）。
+节点二进制与上游 `2.0.7-beta` 一致，无需改动。
+
+> 也可以在面板里直接复制生成的安装命令，它会指向本仓库的 `install.sh`。
+
+### 手动部署（可选，等价于上面脚本做的事）
 
 > 使用本仓库发布的镜像：`docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta`、`docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta`（amd64）。
 
