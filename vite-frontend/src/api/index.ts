@@ -66,6 +66,14 @@ export const diagnoseForward = (forwardId: number) => Network.post("/forward/dia
 // 转发排序操作
 export const updateForwardOrder = (data: { forwards: Array<{ id: number; inx: number }> }) => Network.post("/forward/update-order", data);
 
+// 端口转发流量排行榜 - 统计范围：today / 3d / 7d / 30d
+export type ForwardFlowRange = 'today' | '3d' | '7d' | '30d';
+export const getForwardFlowRanking = (range: ForwardFlowRange = 'today') =>
+  Network.post("/forward-flow/ranking", { range });
+
+// 实时速率（节点上报增量 + 内存滑动窗口，不落库）
+export const getCurrentFlowRate = () => Network.post("/flow-rate/current");
+
 // 限速规则CRUD操作 - 全部使用POST请求
 export const createSpeedLimit = (data: any) => Network.post("/speed-limit/create", data);
 export const getSpeedLimitList = () => Network.post("/speed-limit/list");

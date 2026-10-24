@@ -6,7 +6,7 @@ import toast from 'react-hot-toast';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 
-import { getUserPackageInfo } from "@/api";
+import { getUserPackageInfo, getCurrentFlowRate } from "@/api";
 
 interface UserInfo {
   flow: number;
@@ -57,6 +57,32 @@ interface StatisticsFlow {
   time: string;
 }
 
+interface FlowRateTop {
+  forwardId?: number;
+  forwardName?: string;
+  port?: number;
+  userId?: number;
+  userName?: string;
+  totalRate?: number;
+  inRate?: number;
+  outRate?: number;
+}
+
+interface FlowRateInfo {
+  windowSeconds: number;
+  sampleTime?: number | null;
+  scope: 'all' | 'self';
+  totalRate: number;
+  inRate: number;
+  outRate: number;
+  inPercent: number;
+  outPercent: number;
+  activeForwardCount: number;
+  activeUserCount: number;
+  topForward?: FlowRateTop | null;
+  topUser?: FlowRateTop | null;
+}
+
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [userInfo, setUserInfo] = useState<UserInfo>({} as UserInfo);
@@ -64,6 +90,7 @@ export default function DashboardPage() {
   const [forwardList, setForwardList] = useState<Forward[]>([]);
   const [statisticsFlows, setStatisticsFlows] = useState<StatisticsFlow[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [flowRate, setFlowRate] = useState<FlowRateInfo | null>(null);
   
   const [addressModalOpen, setAddressModalOpen] = useState(false);
   const [addressModalTitle, setAddressModalTitle] = useState('');
@@ -175,6 +202,37 @@ export default function DashboardPage() {
     localStorage.setItem('e', '/dashboard');
   }, []);
 
+  // 实时速率：每 2 秒刷新一次，页面隐藏时暂停
+  useEffect(() => {
+    let cancelled = false;
+    let inFlight = false;
+
+    const loadFlowRate = async () => {
+      if (inFlight || document.visibilityState !== 'visible') {
+        return;
+      }
+      inFlight = true;
+      try {
+        const res = await getCurrentFlowRate();
+        if (!cancelled && res.code === 0 && res.data) {
+          setFlowRate(res.data as FlowRateInfo);
+        }
+      } catch (error) {
+        // 实时指标失败不打断页面，保留上一次数值
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    loadFlowRate();
+    const timer = window.setInterval(loadFlowRate, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const loadPackageData = async () => {
     setLoading(true);
     try {
@@ -214,6 +272,15 @@ export default function DashboardPage() {
       if (value < 1024 * 1024 * 1024) return (value / (1024 * 1024)).toFixed(2) + ' MB';
       return (value / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
     }
+  };
+
+  // 字节/秒 -> 网速显示（与截图一致的 Mbit/s 口径）
+  const formatSpeed = (bytesPerSecond?: number | null): string => {
+    const bits = (bytesPerSecond || 0) * 8;
+    if (bits >= 1e9) return `${(bits / 1e9).toFixed(2)} Gbit/s`;
+    if (bits >= 1e6) return `${(bits / 1e6).toFixed(1)} Mbit/s`;
+    if (bits >= 1e3) return `${(bits / 1e3).toFixed(1)} Kbit/s`;
+    return `${bits.toFixed(0)} bit/s`;
   };
 
   const formatNumber = (value: number): string => {
@@ -707,6 +774,91 @@ export default function DashboardPage() {
              </CardBody>
            </Card>
          </div>
+
+         {/* 实时速率 */}
+         <Card className="mb-6 lg:mb-8 border border-gray-200 dark:border-default-200 shadow-md">
+           <CardHeader className="pb-2">
+             <div className="flex items-center justify-between w-full">
+               <div className="flex items-center gap-2">
+                 <svg className="w-5 h-5 text-primary" fill="currentColor" viewBox="0 0 20 20">
+                   <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
+                 </svg>
+                 <h2 className="text-lg lg:text-xl font-semibold text-foreground">实时速率</h2>
+               </div>
+               <div className="flex items-center gap-2 text-xs text-default-500">
+                 <span className={`w-1.5 h-1.5 rounded-full ${(flowRate?.totalRate || 0) > 0 ? 'bg-green-500' : 'bg-default-300'}`}></span>
+                 <span>每 2 秒刷新</span>
+                 {flowRate && (
+                   <span className="hidden sm:inline">· {flowRate.scope === 'all' ? '全部用户' : '我的转发'}</span>
+                 )}
+               </div>
+             </div>
+           </CardHeader>
+           <CardBody className="pt-0">
+             <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-2">
+               <div>
+                 <p className="text-3xl lg:text-4xl font-bold text-foreground">{formatSpeed(flowRate?.totalRate)}</p>
+                 <p className="text-xs text-default-500 mt-1">
+                   {flowRate?.activeForwardCount || 0} 个端口有流量
+                   {flowRate?.scope === 'all' ? ` · ${flowRate?.activeUserCount || 0} 位用户` : ''}
+                 </p>
+               </div>
+               <p className="text-xs text-default-400">
+                 {flowRate?.sampleTime
+                   ? `最近上报 ${new Date(flowRate.sampleTime).toLocaleTimeString('zh-CN', { hour12: false })}`
+                   : '等待上报...'}
+               </p>
+             </div>
+
+             <div className="w-full h-2 rounded-full bg-default-100 dark:bg-default-200/20 overflow-hidden flex mt-3">
+               <div className="h-full bg-primary" style={{ width: `${flowRate?.inPercent || 0}%` }}></div>
+               <div className="h-full bg-default-400 dark:bg-default-500" style={{ width: `${flowRate?.outPercent || 0}%` }}></div>
+             </div>
+
+             <div className="flex flex-wrap items-center gap-x-8 gap-y-2 mt-3">
+               <div className="flex items-center gap-2">
+                 <span className="w-2 h-2 rounded-sm bg-primary flex-shrink-0"></span>
+                 <span className="text-xs text-default-600">入站</span>
+                 <span className="text-sm font-medium text-foreground">{formatSpeed(flowRate?.inRate)}</span>
+                 <span className="text-xs text-default-400">{(flowRate?.inPercent || 0).toFixed(1)}%</span>
+               </div>
+               <div className="flex items-center gap-2">
+                 <span className="w-2 h-2 rounded-sm bg-default-400 flex-shrink-0"></span>
+                 <span className="text-xs text-default-600">出站</span>
+                 <span className="text-sm font-medium text-foreground">{formatSpeed(flowRate?.outRate)}</span>
+                 <span className="text-xs text-default-400">{(flowRate?.outPercent || 0).toFixed(1)}%</span>
+               </div>
+             </div>
+
+             {(flowRate?.topForward || flowRate?.topUser) && (
+               <div className="flex flex-wrap items-center gap-x-8 gap-y-2 mt-3 pt-3 border-t border-divider">
+                 {flowRate?.topForward && (
+                   <div className="flex items-center gap-2 min-w-0">
+                     <span className="text-xs text-default-500 flex-shrink-0">最忙端口</span>
+                     <span className="text-sm text-foreground truncate">
+                       {flowRate.topForward.forwardName}
+                       {flowRate.topForward.port ? `:${flowRate.topForward.port}` : ''}
+                     </span>
+                     <span className="text-xs font-medium text-default-500 flex-shrink-0">
+                       {formatSpeed(flowRate.topForward.totalRate)}
+                     </span>
+                   </div>
+                 )}
+                 {flowRate?.topUser && (
+                   <div className="flex items-center gap-2 min-w-0">
+                     <span className="text-xs text-default-500 flex-shrink-0">最高用户</span>
+                     <span className="text-sm text-foreground truncate">
+                       {flowRate.topUser.userName || `用户#${flowRate.topUser.userId}`}
+                     </span>
+                     <span className="text-xs font-medium text-default-500 flex-shrink-0">
+                       {formatSpeed(flowRate.topUser.totalRate)}
+                     </span>
+                   </div>
+                 )}
+               </div>
+             )}
+           </CardBody>
+         </Card>
 
          {/* 24小时流量统计图表 */}
          <Card className="mb-6 lg:mb-8 border border-gray-200 dark:border-default-200 shadow-md">

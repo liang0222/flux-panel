@@ -5,6 +5,7 @@ import IndexPage from "@/pages/index";
 import ChangePasswordPage from "@/pages/change-password";
 import DashboardPage from "@/pages/dashboard";
 import ForwardPage from "@/pages/forward";
+import FlowRankingPage from "@/pages/flow-ranking";
 import TunnelPage from "@/pages/tunnel";
 import NodePage from "@/pages/node";
 import UserPage from "@/pages/user";
@@ -170,6 +171,14 @@ function App() {
         element={
           <ProtectedRoute>
             <ForwardPage />
+          </ProtectedRoute>
+        } 
+      />
+      <Route 
+        path="/flow-ranking" 
+        element={
+          <ProtectedRoute>
+            <FlowRankingPage />
           </ProtectedRoute>
         } 
       />
