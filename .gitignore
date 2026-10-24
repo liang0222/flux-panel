@@ -258,3 +258,5 @@ doraemon.jks
 device.id
 commit.sh
 sql/
+# 本地部署导出的镜像包
+deploy/*.tar

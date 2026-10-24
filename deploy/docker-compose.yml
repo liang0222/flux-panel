@@ -1,0 +1,52 @@
+# 本地面板部署：直接从源码构建镜像，不依赖 Docker Hub / GitHub
+# 用法：cd deploy && cp .env.example .env && docker compose up -d --build
+services:
+  backend:
+    build:
+      context: ../springboot-backend
+    image: local/flux-panel-backend:2.0.7-beta
+    container_name: springboot-backend
+    restart: unless-stopped
+    environment:
+      DB_PATH: /app/data/gost.db
+      JWT_SECRET: ${JWT_SECRET:?请在 deploy/.env 中设置 JWT_SECRET}
+      LOG_DIR: /app/logs
+      JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
+    ports:
+      - "${BACKEND_PORT:-6365}:6365"
+    volumes:
+      - backend_logs:/app/logs
+      - sqlite_data:/app/data
+    networks: [gost-network]
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget --no-verbose --tries=1 --spider http://localhost:6365/flow/test || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  frontend:
+    build:
+      context: ../vite-frontend
+    image: local/flux-panel-frontend:2.0.7-beta
+    container_name: vite-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-6366}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [gost-network]
+
+volumes:
+  sqlite_data:
+    name: sqlite_data
+  backend_logs:
+    name: backend_logs
+
+networks:
+  gost-network:
+    name: gost-network
+    driver: bridge
