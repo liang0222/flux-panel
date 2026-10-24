@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 测试专用日志配置：不依赖 LOG_DIR 等运行环境变量，保证 mvn test 可直接运行 -->
+<configuration>
+    <appender name="console" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss} %-5level %logger{20} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="com.admin" level="INFO"/>
+
+    <root level="WARN">
+        <appender-ref ref="console"/>
+    </root>
+</configuration>
