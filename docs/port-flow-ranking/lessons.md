@@ -274,6 +274,22 @@
     解法：验证时显式 `-v /tmp/xxx:/app/data -e DB_PATH=/app/data/gost.db -e LOG_DIR=/app/logs -e JWT_SECRET=...`；用完 `docker rm -f` + 删临时目录。
     通用：是。
 
+51. **只写 `[::]:PORT:PORT` 的端口映射是"纯 IPv6"，不是双栈**
+    现象：`docker run -p "[::]:18080:80"` 后 `ss` 只有 `[::]:18080`，`curl http://127.0.0.1:18080/` 返回 000（连不上），而 `curl http://[::1]:18080/` 正常。
+    解法：双栈要写两条映射 —— `0.0.0.0:PORT:容器端口` + `[::]:PORT:容器端口`；验证用 `ss -lntp | grep PORT` 看是否同时出现 `0.0.0.0:` 与 `[::]:`。
+    通用：是。
+
+52. **自定义 nginx.conf 覆盖主配置后，基础镜像的 `listen [::]:80` 就失效了**
+    现象：镜像里 `/etc/nginx/conf.d/default.conf` 明明有 `listen [::]:80;`，但容器内 `cat /proc/net/tcp6` 无监听、`wget http://[::1]:80/` 被拒；宿主 IPv6 访问 `Connection reset by peer`，IPv4 正常。
+    根因：`COPY nginx.conf /etc/nginx/nginx.conf` 换掉了主配置，而它**没有 `include /etc/nginx/conf.d/*.conf;`**，所以 conf.d 里的 IPv6 监听根本没加载；自己的 `server { listen 80; }` 只绑定 IPv4。
+    解法：在自有 server 块里补 `listen [::]:80;`，`nginx -t && nginx -s reload` 验证（容器内 `wget http://[::1]:80/` 返回 200）。
+    通用：是（任何用自定义主配置覆盖 nginx 镜像的场景）。
+
+53. **判断"是不是 IPv6 通了"要分层验证，不要只看宿主端口**
+    分层：① 宿主 `ss -lntp` 有 `[::]:端口` → ② 宿主 `curl http://[::1]:端口/` 通 → ③ 容器内 `wget http://[::1]:容器端口/` 通 → ④ 面板里填 `[IPv6]:端口` 生成节点命令。
+    本次故障正是卡在 ③：宿主映射有了，容器内 nginx 没监听 IPv6，表现为 reset 而不是 timeout，容易误判成防火墙。
+    通用：是。
+
 ## J. 下次的 30 分钟快速通道
 
 1. 钉输入（仓库/tag/单元/口径）→ clone + 建分支（5 分钟）

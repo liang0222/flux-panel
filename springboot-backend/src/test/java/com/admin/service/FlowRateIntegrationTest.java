@@ -105,6 +105,37 @@ class FlowRateIntegrationTest {
     }
 
     @Test
+    @DisplayName("管理员自己的转发流量也计入管理员视图（不是只统计普通用户）")
+    void adminOwnForwardIsVisibleToAdmin() throws Exception {
+        Node node = new Node();
+        node.setName("管理员自有转发测试节点");
+        node.setSecret("rate-admin-own-secret");
+        node.setServerIp("127.0.0.1");
+        node.setPort("8200-8300");
+        node.setStatus(1);
+        node.setCreatedTime(System.currentTimeMillis());
+        node.setUpdatedTime(System.currentTimeMillis());
+        nodeService.save(node);
+
+        // 服务名中的用户ID为管理员（1），模拟管理员自建转发的上报
+        upload("rate-admin-own-secret", "[{\"n\":\"9401_1_0\",\"d\":30000,\"u\":10000}]");
+
+        String adminToken = JwtUtil.generateToken(user(1L, 0));
+        JSONObject all = callCurrentRate(adminToken);
+
+        assertEquals("all", all.getString("scope"));
+        // 管理员视图至少包含自己这条转发的 (30000+10000)/10 = 4000 B/s
+        // （统计器是单例，同一窗口内可能有其它用例的数据，因此用 >= 与 Top 断言）
+        assertTrue(all.getLongValue("totalRate") >= 4000L);
+        assertTrue(all.getIntValue("activeForwardCount") >= 1);
+        JSONObject topUser = all.getJSONObject("topUser");
+        assertNotNull(topUser);
+        assertEquals(1, topUser.getIntValue("userId"));
+        assertEquals(4000L, topUser.getLongValue("totalRate"));
+        assertEquals(9401L, all.getJSONObject("topForward").getLongValue("forwardId"));
+    }
+
+    @Test
     @DisplayName("未登录访问实时速率返回 401")
     void unauthorized() throws Exception {
         MvcResult result = mockMvc.perform(post("/api/v1/flow-rate/current"))

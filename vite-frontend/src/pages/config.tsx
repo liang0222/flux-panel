@@ -47,8 +47,8 @@ const CONFIG_ITEMS: ConfigItem[] = [
   {
     key: 'ip',
     label: '面板后端地址',
-    placeholder: '请输入面板后端IP:PORT',
-    description: '格式“ip:port”,用于对接节点时使用,ip是你安装面板服务器的公网ip,端口是安装脚本内输入的后端端口。不要套CDN,不支持https,通讯数据有加密',
+    placeholder: '请输入面板后端IP:PORT（IPv6 用 [地址]:端口）',
+    description: '格式“ip:port”,用于对接节点时使用,ip是你安装面板服务器的公网ip,端口是安装脚本内输入的后端端口。IPv6 请写成“[2408:xxxx::1]:6365”这种带方括号的形式。不要套CDN,不支持https,通讯数据有加密',
     type: 'input'
   },
   {

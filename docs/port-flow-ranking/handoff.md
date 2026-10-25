@@ -5,7 +5,7 @@
 
 ## 一句话现状
 
-两期功能都已实现并验证：**端口流量排行** + **仪表盘实时速率**（47 个后端测试、前端构建、真实 Docker 部署与页面渲染截图）。代码已提交并推送到 **GitHub `liang0222/flux-panel`**（`feat/port-traffic-ranking` 分支头），镜像已推送到 **Docker Hub `ahmadplayz721`**（`2.0.7-beta` / `latest`，amd64+arm64，已拉取核对镜像内确含新代码）；2026-10-25 做过一轮全面代码审查（`code-review.md`），无阻断缺陷。剩余工作只有服务器部署、合并到 `main` 时改安装 URL、可选的体验补充和上线观察。
+两期功能都已实现并验证：**端口流量排行** + **仪表盘实时速率**（48 个后端测试、前端构建、真实 Docker 部署与页面渲染截图）。代码已提交并推送到 **GitHub `liang0222/flux-panel`**（`feat/port-traffic-ranking` 分支头），镜像已推送到 **Docker Hub `ahmadplayz721`**（`2.0.7-beta` / `latest`，amd64+arm64，已拉取核对镜像内确含新代码）；2026-10-25 做过一轮全面代码审查（`code-review.md`），无阻断缺陷。剩余工作只有服务器部署、合并到 `main` 时改安装 URL、可选的体验补充和上线观察。
 
 ## 代码位置与状态
 
@@ -114,6 +114,13 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 - `docker compose restart backend`：数据与接口不变；删除 forward 后 `deleted=true`、历史保留。
 - `docker save`（201MB）→ `docker rmi` → `docker load` → `up -d`：镜像恢复、healthy、数据与接口正常；SPA 路由 `/flow-ranking` 返回 200。
 - 验证后已 `down -v` 清理测试数据，保留镜像与 `deploy/flux-panel-images-2.0.7-beta.tar`。
+
+## 本轮新增：IPv6 双栈与管理员可见范围（2026-10-25）
+
+- 面板 IPv6 双栈：`docker-compose-v6.yml` 的后端 6365 / 前端 80 同时绑定 `0.0.0.0` 与 `[::]`（只写 `[::]` 会变成纯 IPv6）；`vite-frontend/nginx.conf` 的 server 块补 `listen [::]:80;`（自定义主配置不 include conf.d，基础镜像的 IPv6 监听原本失效）。
+- 节点侧：`GostUtil.processServerAddress` 已会自动给 IPv6 加方括号，`install.sh` 的地址校验正则也接受 `[addr]:port`，agent 的 URL 是字符串拼接，方括号形式可直接用；面板「网站配置」的地址说明已补 IPv6 写法提示。
+- 实时速率范围：管理员本来就是 `scope=all`（`currentRates(null)` 不过滤用户），新增用例 `adminOwnForwardIsVisibleToAdmin` 固定该行为（管理员自建转发 `9401_1_0` 的 4000 B/s 计入管理员视图）。
+- 验证：后端 48 测试全绿；本地起 v6 compose（16365/16366）实测 `ss` 同时出现 `0.0.0.0:` 与 `[::]:`，IPv4/IPv6 访问后端与前端均 200（修 nginx 前 IPv6 前端为 reset）。
 
 ## 本轮新增：仪表盘「实时速率」（2026-10-21）
 
