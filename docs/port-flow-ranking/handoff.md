@@ -5,14 +5,14 @@
 
 ## 一句话现状
 
-两期功能都已实现并验证：**端口流量排行** + **仪表盘实时速率**（47 个后端测试、前端构建、真实 Docker 部署与页面渲染截图）。代码已提交并推送到 **GitHub `liang0222/flux-panel`**（17 个提交，最新 `fc1db1a`），镜像已推送到 **Docker Hub `ahmadplayz721`**（`2.0.7-beta` / `latest`，amd64+arm64，已拉取核对镜像内确含新代码）；2026-10-25 做过一轮全面代码审查（`code-review.md`），无阻断缺陷。剩余工作只有服务器部署、合并到 `main` 时改安装 URL、可选的体验补充和上线观察。
+两期功能都已实现并验证：**端口流量排行** + **仪表盘实时速率**（47 个后端测试、前端构建、真实 Docker 部署与页面渲染截图）。代码已提交并推送到 **GitHub `liang0222/flux-panel`**（`feat/port-traffic-ranking` 分支头），镜像已推送到 **Docker Hub `ahmadplayz721`**（`2.0.7-beta` / `latest`，amd64+arm64，已拉取核对镜像内确含新代码）；2026-10-25 做过一轮全面代码审查（`code-review.md`），无阻断缺陷。剩余工作只有服务器部署、合并到 `main` 时改安装 URL、可选的体验补充和上线观察。
 
 ## 代码位置与状态
 
 - 仓库：`/root/v2.0.7-beta`（clone 自 `https://github.com/bqlpfy/flux-panel`）
 - 分支：`feat/port-traffic-ranking`，基于 tag **`2.0.7-beta`**（`761db18`）
 - GitHub：https://github.com/liang0222/flux-panel （`origin` 已指向它，`upstream` 保留原作者）
-- 提交：17 个（后端 / 测试 / 前端 / 部署脚本 / 文档 / CI / 安装脚本 / 审查），最新 `fc1db1a`，工作区干净
+- 提交：18+ 个（后端 / 测试 / 前端 / 部署脚本 / 文档 / CI / 安装脚本 / 审查），工作区干净，以分支头为准
 - Docker Hub：`ahmadplayz721/flux-panel-backend:2.0.7-beta`、`ahmadplayz721/flux-panel-frontend:2.0.7-beta`（2026-10-24 已推送）
 - 一键安装：`panel_install.sh` / `install.sh` 已改为本仓库地址；面板生成的节点安装命令也指向本仓库
 - CI：GitHub Actions 已跑通（run 40078633991），自动构建 amd64 + arm64 并推送 `latest`/`2.0.7-beta`
@@ -145,7 +145,7 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 
 ### 必做（交给用户决定）
 
-1. ~~提交代码~~ 已完成（全部提交已推送到 GitHub，最新 `fc1db1a`）。
+1. ~~提交代码~~ 已完成（全部提交已推送到 GitHub 的 `feat/port-traffic-ranking`）。
 1b. **合并到 `main` 后同步改一键安装 URL**：`panel_install.sh:11-12` 现在写死 `refs/heads/feat/port-traffic-ranking`，分支删除/改名会让一键安装 404（详见 `code-review.md` M2）。
 1c. ~~CI 标签陷阱~~ 已修复：`docker-build.yml` 改为按面板源码相对标签是否有改动决定构建，不再因标签存在而静默跳过（详见 `code-review.md` M1）。
 2. **服务器部署**：直接跑 README 里的「面板端（开发版）」命令，或用 `deploy/docker-compose.registry.yml` 拉取镜像启动。
