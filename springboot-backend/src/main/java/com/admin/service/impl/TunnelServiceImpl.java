@@ -5,6 +5,7 @@ import com.admin.common.dto.*;
 import com.admin.common.lang.R;
 import com.admin.common.utils.GostUtil;
 import com.admin.common.utils.JwtUtil;
+import com.admin.common.utils.TcpPingDiagnosisRunner;
 import com.admin.common.utils.WebSocketServer;
 import com.admin.entity.*;
 import com.admin.mapper.TunnelMapper;
@@ -612,98 +613,11 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
     }
 
     private DiagnosisResult performTcpPingDiagnosis(Node node, String targetIp, int port, String description) {
-        try {
-            // 构建TCP ping请求数据
-            JSONObject tcpPingData = new JSONObject();
-            tcpPingData.put("ip", targetIp);
-            tcpPingData.put("port", port);
-            tcpPingData.put("count", 4);
-            tcpPingData.put("timeout", 5000); // 5秒超时
-
-            // 发送TCP ping命令到节点
-            GostDto gostResult = WebSocketServer.send_msg(node.getId(), tcpPingData, "TcpPing");
-
-            DiagnosisResult result = new DiagnosisResult();
-            result.setNodeId(node.getId());
-            result.setNodeName(node.getName());
-            result.setTargetIp(targetIp);
-            result.setTargetPort(port);
-            result.setDescription(description);
-            result.setTimestamp(System.currentTimeMillis());
-
-            if (gostResult != null && "OK".equals(gostResult.getMsg())) {
-                // 尝试解析TCP ping响应数据
-                try {
-                    if (gostResult.getData() != null) {
-                        JSONObject tcpPingResponse = (JSONObject) gostResult.getData();
-                        boolean success = tcpPingResponse.getBooleanValue("success");
-
-                        result.setSuccess(success);
-                        if (success) {
-                            result.setMessage("TCP连接成功");
-                            result.setAverageTime(tcpPingResponse.getDoubleValue("averageTime"));
-                            result.setPacketLoss(tcpPingResponse.getDoubleValue("packetLoss"));
-                        } else {
-                            result.setMessage(tcpPingResponse.getString("errorMessage"));
-                            result.setAverageTime(-1.0);
-                            result.setPacketLoss(100.0);
-                        }
-                    } else {
-                        // 没有详细数据，使用默认值
-                        result.setSuccess(true);
-                        result.setMessage("TCP连接成功");
-                        result.setAverageTime(0.0);
-                        result.setPacketLoss(0.0);
-                    }
-                } catch (Exception e) {
-                    // 解析响应数据失败，但TCP ping命令本身成功了
-                    result.setSuccess(true);
-                    result.setMessage("TCP连接成功，但无法解析详细数据");
-                    result.setAverageTime(0.0);
-                    result.setPacketLoss(0.0);
-                }
-            } else {
-                result.setSuccess(false);
-                result.setMessage(gostResult != null ? gostResult.getMsg() : "节点无响应");
-                result.setAverageTime(-1.0);
-                result.setPacketLoss(100.0);
-            }
-
-            return result;
-        } catch (Exception e) {
-            DiagnosisResult result = new DiagnosisResult();
-            result.setNodeId(node.getId());
-            result.setNodeName(node.getName());
-            result.setTargetIp(targetIp);
-            result.setTargetPort(port);
-            result.setDescription(description);
-            result.setSuccess(false);
-            result.setMessage("诊断执行异常: " + e.getMessage());
-            result.setTimestamp(System.currentTimeMillis());
-            result.setAverageTime(-1.0);
-            result.setPacketLoss(100.0);
-            return result;
-        }
+        return TcpPingDiagnosisRunner.run(node, targetIp, port, description);
     }
 
     private DiagnosisResult performTcpPingDiagnosisWithConnectionCheck(Node node, String targetIp, int port, String description) {
-        DiagnosisResult result = new DiagnosisResult();
-        result.setNodeId(node.getId());
-        result.setNodeName(node.getName());
-        result.setTargetIp(targetIp);
-        result.setTargetPort(port);
-        result.setDescription(description);
-        result.setTimestamp(System.currentTimeMillis());
-
-        try {
-            return performTcpPingDiagnosis(node, targetIp, port, description);
-        } catch (Exception e) {
-            result.setSuccess(false);
-            result.setMessage("连接检查异常: " + e.getMessage());
-            result.setAverageTime(-1.0);
-            result.setPacketLoss(100.0);
-            return result;
-        }
+        return TcpPingDiagnosisRunner.run(node, targetIp, port, description);
     }
 
 

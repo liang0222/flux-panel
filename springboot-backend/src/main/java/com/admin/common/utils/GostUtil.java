@@ -5,12 +5,14 @@ import com.admin.common.dto.GostDto;
 import com.admin.entity.*;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+@Slf4j
 public class GostUtil {
 
 
@@ -42,7 +44,46 @@ public class GostUtil {
     }
 
     public static GostDto AddChains(Long node_id, List<ChainTunnel> chainTunnels, Map<Long, Node> node_s) {
+        return AddChains(node_id, chainTunnels, node_s, WebSocketServer::send_msg);
+    }
+
+    public static GostDto AddChains(Long node_id, List<ChainTunnel> chainTunnels, Map<Long, Node> node_s,
+                                    NodeCommandSender sender) {
+        JSONObject data = buildChainConfig(node_id, chainTunnels, node_s);
+
+        GostDto gostDto = sender.send(node_id, data, "AddChains");
+        String msg = gostDto == null || gostDto.getMsg() == null ? "" : gostDto.getMsg();
+        if (!isChainAlreadyExists(msg)) {
+            return gostDto;
+        }
+
+        // gost 的 AddChains 遇到同名转发链只会返回 “already exists”，不会覆盖节点上的旧配置。
+        // 节点侧残留旧链时（删除隧道时节点离线、或隧道 ID 被复用），面板会误以为下发成功，
+        // 实际流量仍走旧节点/旧端口 —— 表现为“面板诊断正常、实际端口不通”。
+        // 因此这里改为显式下发 UpdateChains，把节点上的旧链覆盖成当前配置。
+        log.warn("节点 {} 上已存在转发链 {}，改为下发 UpdateChains 覆盖旧配置", node_id, data.getString("name"));
+        JSONObject updateData = new JSONObject();
+        updateData.put("chain", data.getString("name"));
+        updateData.put("data", data);
+        GostDto updateResult = sender.send(node_id, updateData, "UpdateChains");
+        String updateMsg = updateResult == null || updateResult.getMsg() == null ? "" : updateResult.getMsg();
+        if (isChainNotFound(updateMsg)) {
+            // 并发场景下链可能刚被删除，退回新增
+            log.warn("节点 {} 上的转发链 {} 已不存在，退回 AddChains", node_id, data.getString("name"));
+            return sender.send(node_id, data, "AddChains");
+        }
+        return updateResult;
+    }
+
+    /**
+     * 构建转发链配置（纯函数，便于单元测试）
+     */
+    public static JSONObject buildChainConfig(Long node_id, List<ChainTunnel> chainTunnels, Map<Long, Node> node_s) {
+        if (chainTunnels == null || chainTunnels.isEmpty()) {
+            throw new IllegalArgumentException("转发链节点列表不能为空");
+        }
         JSONArray nodes = new JSONArray();
+        int index = 0;
         for (ChainTunnel chainTunnel : chainTunnels) {
             JSONObject dialer = new JSONObject();
             dialer.put("type", chainTunnel.getProtocol());
@@ -50,31 +91,33 @@ public class GostUtil {
             JSONObject connector = new JSONObject();
             connector.put("type", "relay");
 
-            Node node_info = node_s.get(chainTunnel.getNodeId());
+            Node node_info = node_s == null ? null : node_s.get(chainTunnel.getNodeId());
+            if (node_info == null) {
+                throw new IllegalStateException("转发链引用的节点不存在: " + chainTunnel.getNodeId());
+            }
             JSONObject node = new JSONObject();
-            node.put("name", "node_" + chainTunnel.getInx());
+            // 入口/出口节点的 inx 为空，旧实现会生成重名的 node_null，多个节点时相互覆盖
+            node.put("name", buildChainNodeName(index, chainTunnel));
             node.put("addr", processServerAddress(node_info.getServerIp() + ":" + chainTunnel.getPort()));
             node.put("connector", connector);
             node.put("dialer", dialer);
 
-
-
             nodes.add(node);
+            index++;
         }
         JSONObject hop = new JSONObject();
         hop.put("name", "hop_" + chainTunnels.getFirst().getTunnelId());
 
         // interface设置在转发链
-        if (StringUtils.isNotBlank(node_s.get(node_id).getInterfaceName())) {
-            hop.put("interface", node_s.get(node_id).getInterfaceName());
+        Node currentNode = node_s == null ? null : node_s.get(node_id);
+        if (currentNode != null && StringUtils.isNotBlank(currentNode.getInterfaceName())) {
+            hop.put("interface", currentNode.getInterfaceName());
         }
-
 
         JSONObject selector = new JSONObject();
         selector.put("strategy", chainTunnels.getFirst().getStrategy());
         selector.put("maxFails", 1);
         selector.put("failTimeout", 600000000000L); // 600 秒（纳秒单位）
-
 
         hop.put("selector", selector);
         hop.put("nodes", nodes);
@@ -85,12 +128,23 @@ public class GostUtil {
         JSONObject data = new JSONObject();
         data.put("name", "chains_" + chainTunnels.getFirst().getTunnelId());
         data.put("hops", hops);
+        return data;
+    }
 
-        GostDto gostDto = WebSocketServer.send_msg(node_id, data, "AddChains");
-        if (gostDto.getMsg().contains("exists")){
-            gostDto.setMsg("OK");
-        }
-        return gostDto;
+    /**
+     * 转发链内节点名，必须唯一：入口/出口的 inx 为空，仅靠 inx 会重名
+     */
+    public static String buildChainNodeName(int index, ChainTunnel chainTunnel) {
+        String suffix = chainTunnel.getInx() == null ? "n" + chainTunnel.getNodeId() : "c" + chainTunnel.getInx();
+        return "node_" + index + "_" + suffix;
+    }
+
+    public static boolean isChainAlreadyExists(String msg) {
+        return msg != null && msg.toLowerCase().contains("already exists");
+    }
+
+    public static boolean isChainNotFound(String msg) {
+        return msg != null && msg.toLowerCase().contains("not found");
     }
 
     public static GostDto DeleteChains(Long node_id, String name) {
