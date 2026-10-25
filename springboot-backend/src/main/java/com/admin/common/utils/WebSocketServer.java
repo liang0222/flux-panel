@@ -17,6 +17,7 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import javax.annotation.Resource;
+import java.net.InetSocketAddress;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArraySet;
@@ -234,7 +235,11 @@ public class WebSocketServer extends TextWebSocketHandler {
                 // 检查是否已有该节点的连接，如果有则记录日志但直接覆盖
                 WebSocketSession existingSession = nodeSessions.get(nodeId);
                 if (existingSession != null && existingSession.isOpen()) {
-                    log.info("节点 {} 已有连接存在: {}，新连接将覆盖旧连接", nodeId, existingSession.getId());
+                    // 同一个 secret 同时被两台机器（或两个进程）使用时，会在这里反复互相顶掉，
+                    // 表现为节点每 2 秒重连一次、状态忽上忽下。把两端地址打出来，便于定位是谁在抢。
+                    log.warn("节点 {} 已有连接存在: {}（来源 {}），新连接来自 {}，将覆盖旧连接；" +
+                                    "若持续出现，说明同一个节点密钥被多台机器/多个进程同时使用",
+                            nodeId, existingSession.getId(), remoteAddressOf(existingSession), remoteAddressOf(session));
                     // 清理旧连接的锁对象
                     sessionLocks.remove(existingSession.getId());
                 }
@@ -306,6 +311,19 @@ public class WebSocketServer extends TextWebSocketHandler {
                 log.info("清理异常会话时出错: {}", cleanupException.getMessage());
             }
         }
+    }
+
+    /**
+     * 取会话对端地址，取不到时返回 unknown（仅用于日志）
+     */
+    private String remoteAddressOf(WebSocketSession session) {
+        if (session == null || session.getRemoteAddress() == null) {
+            return "unknown";
+        }
+        InetSocketAddress address = session.getRemoteAddress();
+        return address.getAddress() == null
+                ? String.valueOf(address.getHostString())
+                : address.getAddress().getHostAddress();
     }
 
     // 连接关闭后
