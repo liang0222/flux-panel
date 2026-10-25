@@ -22,6 +22,7 @@
 | [handoff.md](handoff.md) | 交接说明：现状、环境、已完成、待办、关键决策、自测、已知限制 |
 | [lessons.md](lessons.md) | 踩坑与解法（53 条）+ 通用步骤与需替换项清单 |
 | [code-review.md](code-review.md) | 全面代码审查报告（HEAD 9ce14d6）：结论、2 项中等风险、6 项轻微、4 项上游继承风险 |
+| [performance-optimization.md](performance-optimization.md) | 性能优化报告：热点清单、优化方案、前后对比实测（上报 −61%、首屏 gzip −74%）、测试与风险 |
 | [deploy-and-publish.md](deploy-and-publish.md) | 部署与发布：本地源码构建 / 离线镜像 / 镜像仓库 / 裸机 |
 | [github-dockerhub.md](github-dockerhub.md) | 用自己的 GitHub + Docker Hub 发布与部署（提交 → 建仓库 → 推镜像 → 服务器拉取 → CI） |
 | [ranking-today.png](ranking-today.png) | 流量排行页实拍（暗色，6 个模拟端口） |
@@ -31,12 +32,13 @@
 
 > 截图均为真实 Docker 栈 + Playwright 渲染，**流量数据是脚本模拟的**，不是真实用户数据。
 
-## 当前状态（2026-10-26 01:30）
+## 当前状态（2026-10-26 03:00）
 
 - 功能：端口转发流量排行（5 分钟采集 / 区间聚合 / 管理员页） + 仪表盘实时速率（10 秒内存窗口 / 2 秒轮询 / 按角色隔离，管理员可见含自己在内的全部用户；卡片内含**前十个端口速率排行**） + 面板 IPv6 双栈访问。
-- 验证：后端 66 个测试全绿；前端 `npm run build` 通过；真实 Docker 部署、接口、重启、删转发、离线镜像 `save/load` 均验证过；页面已截图。
+- 验证：后端 86 个测试全绿；前端 `npm run build` 通过；真实 Docker 部署、接口、重启、删转发、离线镜像 `save/load` 均验证过；页面已截图。
 - 代码：相对 tag `2.0.7-beta` 共 18+ 个 commit 已推送到 GitHub（`liang0222/flux-panel`，`feat/port-traffic-ranking`），工作区干净。
 - 审查：2026-10-25 完成全面代码审查，见 [code-review.md](code-review.md)；无阻断缺陷。CI 标签陷阱（M1）已修复并线上验证；仅剩 M2（安装脚本写死分支）待合并到 `main` 时处理。
+- 性能优化（2026-10-26）：上报热路径批次化 + JWT 解析缓存 + 前端路由分包/压缩，功能与接口不变，详见 [performance-optimization.md](performance-optimization.md)。
 - 镜像：已推送到 Docker Hub（`ahmadplayz721`，tag `2.0.7-beta` + `latest`，amd64/arm64 双架构），并拉取核对过镜像内确含新代码（见 code-review.md「镜像一致性校验」）。
 - 部署：`deploy/` 下有拉镜像（registry）、源码构建、离线 tar 三种方式；仓库根目录的 `panel_install.sh` / `install.sh` 已改为本仓库地址。
 - CI：`.github/workflows/docker-build.yml` 构建 `ahmadplayz721/*` 镜像，secrets 已配置；推送到 `feat/port-traffic-ranking` 或 `main` 自动构建（纯文档改动已跳过，需要时用 `workflow_dispatch` 手动触发）。

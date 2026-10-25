@@ -1,18 +1,24 @@
 import { Route, Routes, useNavigate } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 
 import IndexPage from "@/pages/index";
-import ChangePasswordPage from "@/pages/change-password";
-import DashboardPage from "@/pages/dashboard";
-import ForwardPage from "@/pages/forward";
-import FlowRankingPage from "@/pages/flow-ranking";
-import TunnelPage from "@/pages/tunnel";
-import NodePage from "@/pages/node";
-import UserPage from "@/pages/user";
-import ProfilePage from "@/pages/profile";
-import LimitPage from "@/pages/limit";
-import ConfigPage from "@/pages/config";
-import { SettingsPage } from "@/pages/settings";
+
+// 优化：业务页面改为按路由懒加载，首屏只下载登录页与布局所需的代码。
+// 原来是同步 import，所有页面（含图表库、表格库）都打进同一个 7.5MB 的 index.js，
+// 首屏必须等整包下载解析完才能渲染。
+const ChangePasswordPage = lazy(() => import("@/pages/change-password"));
+const DashboardPage = lazy(() => import("@/pages/dashboard"));
+const ForwardPage = lazy(() => import("@/pages/forward"));
+const FlowRankingPage = lazy(() => import("@/pages/flow-ranking"));
+const TunnelPage = lazy(() => import("@/pages/tunnel"));
+const NodePage = lazy(() => import("@/pages/node"));
+const UserPage = lazy(() => import("@/pages/user"));
+const ProfilePage = lazy(() => import("@/pages/profile"));
+const LimitPage = lazy(() => import("@/pages/limit"));
+const ConfigPage = lazy(() => import("@/pages/config"));
+const SettingsPage = lazy(() =>
+  import("@/pages/settings").then((m) => ({ default: m.SettingsPage })),
+);
 
 import AdminLayout from "@/layouts/admin";
 import H5Layout from "@/layouts/h5";
@@ -58,6 +64,17 @@ const useH5Mode = () => {
 
   return isH5;
 };
+
+// 页面分包加载时的占位，保持在布局内部，避免整页闪烁
+const PageFallback = () => (
+  <div className="flex items-center justify-center py-20">
+    <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600 dark:border-gray-600 dark:border-t-gray-300" />
+  </div>
+);
+
+const LazyPage = ({ children }: { children: React.ReactNode }) => (
+  <Suspense fallback={<PageFallback />}>{children}</Suspense>
+);
 
 // 简化的路由保护组件 - 使用 React Router 导航避免循环
 const ProtectedRoute = ({ children, useSimpleLayout = false, skipLayout = false }: { children: React.ReactNode, useSimpleLayout?: boolean, skipLayout?: boolean }) => {
@@ -154,7 +171,7 @@ function App() {
         path="/change-password" 
         element={
           <ProtectedRoute skipLayout={true}>
-            <ChangePasswordPage />
+            <LazyPage><ChangePasswordPage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -162,7 +179,7 @@ function App() {
         path="/dashboard" 
         element={
           <ProtectedRoute>
-            <DashboardPage />
+            <LazyPage><DashboardPage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -170,7 +187,7 @@ function App() {
         path="/forward" 
         element={
           <ProtectedRoute>
-            <ForwardPage />
+            <LazyPage><ForwardPage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -178,7 +195,7 @@ function App() {
         path="/flow-ranking" 
         element={
           <ProtectedRoute>
-            <FlowRankingPage />
+            <LazyPage><FlowRankingPage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -186,7 +203,7 @@ function App() {
         path="/tunnel" 
         element={
           <ProtectedRoute>
-            <TunnelPage />
+            <LazyPage><TunnelPage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -194,7 +211,7 @@ function App() {
         path="/node" 
         element={
           <ProtectedRoute>
-            <NodePage />
+            <LazyPage><NodePage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -202,7 +219,7 @@ function App() {
         path="/user" 
         element={
           <ProtectedRoute useSimpleLayout={true}>
-            <UserPage />
+            <LazyPage><UserPage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -210,7 +227,7 @@ function App() {
         path="/profile" 
         element={
           <ProtectedRoute>
-            <ProfilePage />
+            <LazyPage><ProfilePage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -218,7 +235,7 @@ function App() {
         path="/limit" 
         element={
           <ProtectedRoute useSimpleLayout={true}>
-            <LimitPage />
+            <LazyPage><LimitPage /></LazyPage>
           </ProtectedRoute>
         } 
       />
@@ -226,13 +243,13 @@ function App() {
         path="/config" 
         element={
           <ProtectedRoute useSimpleLayout={true}>
-            <ConfigPage />
+            <LazyPage><ConfigPage /></LazyPage>
           </ProtectedRoute>
         } 
       />
       <Route 
         path="/settings" 
-        element={<SettingsPage />}
+        element={<LazyPage><SettingsPage /></LazyPage>}
       />
     </Routes>
   );

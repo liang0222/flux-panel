@@ -11,8 +11,10 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -31,9 +33,32 @@ public class JwtUtil {
     // 算法
     private static final String ALGORITHM = "HmacSHA256";
 
+    // 优化：payload 解析结果与"签名已验证"的结论都做有界缓存。
+    // 原来每个请求会解析 2~4 次 payload（每次都要 split 正则 + Base64 解码 + JSON 解析），
+    // 并且每次都要重新做一次 HMAC-SHA256；token 在有效期内内容不会变化，可以安全复用。
+    private static final int CACHE_SIZE = 512;
+    private static final Map<String, Map<String, Object>> PARSED_CACHE = Collections.synchronizedMap(
+            new LinkedHashMap<String, Map<String, Object>>(64, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Map<String, Object>> eldest) {
+                    return size() > CACHE_SIZE;
+                }
+            });
+    private static final Map<String, Long> VERIFIED_CACHE = Collections.synchronizedMap(
+            new LinkedHashMap<String, Long>(64, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+                    return size() > CACHE_SIZE;
+                }
+            });
+
+    private static volatile SecretKeySpec KEY_SPEC;
+    private static final ThreadLocal<Mac> MAC_HOLDER = new ThreadLocal<>();
+
     @PostConstruct
     public void init() {
         SECRET_KEY = this.secretKey;
+        KEY_SPEC = new SecretKeySpec(SECRET_KEY.getBytes(StandardCharsets.UTF_8), ALGORITHM);
     }
 
     /**
@@ -91,8 +116,14 @@ public class JwtUtil {
                 return false;
             }
 
-            String[] parts = token.split("\\.");
-            if (parts.length != 3) {
+            // 已通过签名校验的 token 直接复用结论（仍然每次校验有效期）
+            Long cachedExp = VERIFIED_CACHE.get(token);
+            if (cachedExp != null) {
+                return cachedExp > System.currentTimeMillis() / 1000;
+            }
+
+            String[] parts = splitToken(token);
+            if (parts == null) {
                 return false;
             }
 
@@ -107,12 +138,16 @@ public class JwtUtil {
             }
 
             // 验证过期时间
-            String decodedPayload = new String(Base64.getUrlDecoder().decode(encodedPayload), StandardCharsets.UTF_8);
-            Map<String, Object> payload = JSON.parseObject(decodedPayload, Map.class);
+            Map<String, Object> payload = decodePayload(encodedPayload);
             long exp = Long.parseLong(payload.get("exp").toString());
             long now = System.currentTimeMillis() / 1000;
-            
-            return exp > now;
+            if (exp <= now) {
+                return false;
+            }
+            // 签名与有效期都通过后才缓存，避免被伪造 token 污染缓存
+            PARSED_CACHE.put(token, payload);
+            VERIFIED_CACHE.put(token, exp);
+            return true;
         } catch (Exception e) {
             return false;
         }
@@ -125,30 +160,18 @@ public class JwtUtil {
      * @return 用户ID
      */
     public static Long getUserIdFromToken(String token) {
-        String[] parts = token.split("\\.");
-        String encodedPayload = parts[1];
-        String decodedPayload = new String(Base64.getUrlDecoder().decode(encodedPayload), StandardCharsets.UTF_8);
-        Map<String, Object> payload = JSON.parseObject(decodedPayload, Map.class);
-        return Long.parseLong(payload.get("sub").toString());
+        return Long.parseLong(payloadOf(token).get("sub").toString());
     }
 
 
     public static Integer getUserIdFromToken() {
         String token = HttpContextUtils.getHttpServletRequest().getHeader("Authorization");
-        String[] parts = token.split("\\.");
-        String encodedPayload = parts[1];
-        String decodedPayload = new String(Base64.getUrlDecoder().decode(encodedPayload), StandardCharsets.UTF_8);
-        Map<String, Object> payload = JSON.parseObject(decodedPayload, Map.class);
-        return Integer.parseInt(payload.get("sub").toString());
+        return Integer.parseInt(payloadOf(token).get("sub").toString());
     }
 
     public static String getNameFromToken() {
         String token = HttpContextUtils.getHttpServletRequest().getHeader("Authorization");
-        String[] parts = token.split("\\.");
-        String encodedPayload = parts[1];
-        String decodedPayload = new String(Base64.getUrlDecoder().decode(encodedPayload), StandardCharsets.UTF_8);
-        Map<String, Object> payload = JSON.parseObject(decodedPayload, Map.class);
-        return payload.get("name").toString();
+        return payloadOf(token).get("name").toString();
     }
 
     /**
@@ -158,23 +181,58 @@ public class JwtUtil {
      * @return 角色ID
      */
     public static Integer getRoleIdFromToken(String token) {
-        String[] parts = token.split("\\.");
-        String encodedPayload = parts[1];
-        String decodedPayload = new String(Base64.getUrlDecoder().decode(encodedPayload), StandardCharsets.UTF_8);
-        Map<String, Object> payload = JSON.parseObject(decodedPayload, Map.class);
-        return Integer.parseInt(payload.get("role_id").toString());
+        return Integer.parseInt(payloadOf(token).get("role_id").toString());
     }
 
     @SneakyThrows
     public static Integer getRoleIdFromToken() {
         String token = HttpContextUtils.getHttpServletRequest().getHeader("Authorization");
         if (token == null || token.isEmpty()) throw new Exception();
-        String[] parts = token.split("\\.");
-        String encodedPayload = parts[1];
-        String decodedPayload = new String(Base64.getUrlDecoder().decode(encodedPayload), StandardCharsets.UTF_8);
-        Map<String, Object> payload = JSON.parseObject(decodedPayload, Map.class);
-        return Integer.parseInt(payload.get("role_id").toString());
+        return Integer.parseInt(payloadOf(token).get("role_id").toString());
     }
+    /**
+     * 取出 token 的 payload：优先命中缓存，未命中时解析后放入缓存
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> payloadOf(String token) {
+        Map<String, Object> cached = PARSED_CACHE.get(token);
+        if (cached != null) {
+            return cached;
+        }
+        String[] parts = splitToken(token);
+        Map<String, Object> payload = decodePayload(parts[1]);
+        PARSED_CACHE.put(token, payload);
+        return payload;
+    }
+
+    /**
+     * 按 '.' 切分 token（用 indexOf 代替正则 split）
+     *
+     * @return 三段式返回数组，否则返回 null
+     */
+    private static String[] splitToken(String token) {
+        if (token == null) {
+            return null;
+        }
+        int first = token.indexOf('.');
+        if (first <= 0) {
+            return null;
+        }
+        int second = token.indexOf('.', first + 1);
+        if (second <= first + 1 || second == token.length() - 1) {
+            return null;
+        }
+        if (token.indexOf('.', second + 1) >= 0) {
+            return null;
+        }
+        return new String[]{token.substring(0, first), token.substring(first + 1, second), token.substring(second + 1)};
+    }
+
+    private static Map<String, Object> decodePayload(String encodedPayload) {
+        String decodedPayload = new String(Base64.getUrlDecoder().decode(encodedPayload), StandardCharsets.UTF_8);
+        return JSON.parseObject(decodedPayload, Map.class);
+    }
+
     /**
      * 计算签名
      *
@@ -185,9 +243,17 @@ public class JwtUtil {
      */
     private static String calculateSignature(String encodedHeader, String encodedPayload) throws Exception {
         String content = encodedHeader + "." + encodedPayload;
-        Mac hmac = Mac.getInstance(ALGORITHM);
-        SecretKeySpec secretKeySpec = new SecretKeySpec(SECRET_KEY.getBytes(StandardCharsets.UTF_8), ALGORITHM);
-        hmac.init(secretKeySpec);
+        Mac hmac = MAC_HOLDER.get();
+        if (hmac == null) {
+            hmac = Mac.getInstance(ALGORITHM);
+            MAC_HOLDER.set(hmac);
+        }
+        SecretKeySpec keySpec = KEY_SPEC;
+        if (keySpec == null) {
+            keySpec = new SecretKeySpec(SECRET_KEY.getBytes(StandardCharsets.UTF_8), ALGORITHM);
+            KEY_SPEC = keySpec;
+        }
+        hmac.init(keySpec);
         byte[] signatureBytes = hmac.doFinal(content.getBytes(StandardCharsets.UTF_8));
         return Base64.getUrlEncoder().withoutPadding().encodeToString(signatureBytes);
     }

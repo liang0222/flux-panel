@@ -26,4 +26,12 @@ public interface NodeService extends IService<Node> {
 
     R getInstallCommand(Long id);
 
+    /**
+     * 判断节点密钥是否存在（只取一行，不做计数）
+     *
+     * @param secret 节点密钥
+     * @return 存在返回 true
+     */
+    boolean existsBySecret(String secret);
+
 }

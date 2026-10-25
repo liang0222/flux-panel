@@ -185,4 +185,9 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
 
 
 
+
+    @Override
+    public boolean existsBySecret(String secret) {
+        return baseMapper.existsBySecret(secret) != null;
+    }
 }

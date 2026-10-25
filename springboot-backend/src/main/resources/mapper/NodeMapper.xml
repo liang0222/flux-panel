@@ -2,4 +2,12 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.admin.mapper.NodeMapper">
 
+    <!--
+      节点密钥校验：只需要知道"是否存在"，用 LIMIT 1 命中索引即返回。
+      原来的 count(*) 会扫完所有匹配行（密钥唯一时差别不大，但缺少索引时会退化成全表扫描 + 计数）。
+    -->
+    <select id="existsBySecret" resultType="int">
+        SELECT 1 FROM node WHERE secret = #{secret} LIMIT 1
+    </select>
+
 </mapper>

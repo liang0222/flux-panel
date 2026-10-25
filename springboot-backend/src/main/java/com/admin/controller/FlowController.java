@@ -20,9 +20,14 @@ import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.Resource;
 import java.math.BigDecimal;
-import java.util.Date;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -57,9 +62,20 @@ public class FlowController extends BaseController {
     private static final long BYTES_TO_GB = 1024L * 1024L * 1024L;
 
     // 用于同步相同用户和隧道的流量更新操作
-    private static final ConcurrentHashMap<String, Object> USER_LOCKS = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<String, Object> TUNNEL_LOCKS = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<String, Object> FORWARD_LOCKS = new ConcurrentHashMap<>();
+    // 优化：原来按 ID 往 ConcurrentHashMap 里塞锁对象，转发/用户被删除重建后这些 key 永远不会被移除，
+    // 内存随历史 ID 数量单调增长；改成固定条带锁，内存恒定，相同 ID 仍然落在同一把锁上。
+    private static final int LOCK_STRIPES = 64;
+    private static final Object[] USER_LOCKS = new Object[LOCK_STRIPES];
+    private static final Object[] TUNNEL_LOCKS = new Object[LOCK_STRIPES];
+    private static final Object[] FORWARD_LOCKS = new Object[LOCK_STRIPES];
+
+    static {
+        for (int i = 0; i < LOCK_STRIPES; i++) {
+            USER_LOCKS[i] = new Object();
+            TUNNEL_LOCKS[i] = new Object();
+            FORWARD_LOCKS[i] = new Object();
+        }
+    }
 
     // 缓存加密器实例，避免重复创建
     private static final ConcurrentHashMap<String, AESCrypto> CRYPTO_CACHE = new ConcurrentHashMap<>();
@@ -157,14 +173,23 @@ public class FlowController extends BaseController {
 
         // 3. 解析为FlowDto列表
         JSONArray flowDataList = JSONObject.parseArray(decryptedData);
-        log.info("节点上报流量数据{}", flowDataList);
+        // 优化：原来是每次上报都 log.info 整个数组，节点每 5 秒上报一次，等于持续把 JSON 序列化后写盘；
+        // 改为按日志级别惰性输出，INFO 下不再产生字符串与 IO 开销。
+        if (log.isDebugEnabled()) {
+            log.debug("节点上报流量数据{}", flowDataList);
+        }
+
+        // 4. 同一批次内复用转发/隧道查询结果，并把增量按实体聚合后再写库
+        BatchContext batch = new BatchContext();
         for (int i = 0; i < flowDataList.size(); i++) {
             String jsonObject = flowDataList.getJSONObject(i).toJSONString();
             FlowDto flowDto = JSONObject.parseObject(jsonObject, FlowDto.class);
             if (!Objects.equals(flowDto.getN(), "web_api")) {
-                processFlowData(flowDto);
+                collectFlowData(flowDto, batch);
             }
         }
+        flushFlows(batch);
+        checkLimits(batch);
         return SUCCESS_RESPONSE;
 
     }
@@ -221,43 +246,224 @@ public class FlowController extends BaseController {
     }
 
     /**
-     * 处理流量数据的核心逻辑
+     * 单条流量上报的采集逻辑：只做查询（同批次内缓存）、倍率换算、实时速率记录与增量累加，
+     * 不直接写库。真正落库在 {@link #flushFlows(BatchContext)} 里按实体聚合后一次性完成。
      */
-    private void processFlowData(FlowDto flowDataList) {
-        String[] serviceIds = parseServiceName(flowDataList.getN());
+    private void collectFlowData(FlowDto flowData, BatchContext batch) {
+        String[] serviceIds = parseServiceName(flowData.getN());
         String forwardId = serviceIds[0];
         String userId = serviceIds[1];
         String userTunnelId = serviceIds[2];
 
-        Forward forward = forwardService.getById(forwardId);
-        if (forward != null){
-            Tunnel tunnel = tunnelService.getById(forward.getTunnelId());
+        Forward forward = resolveForward(batch, forwardId);
+        if (forward != null) {
+            Tunnel tunnel = resolveTunnel(batch, forward.getTunnelId());
 
-            //  处理流量倍率及单双向计算
+            // 流量倍率换算
+            // 优化：倍率为 1 时 BigDecimal 乘 1 不改变数值，跳过 BigDecimal 的创建与运算（结果完全一致）
             BigDecimal trafficRatio = tunnel.getTrafficRatio();
-            BigDecimal originalD = BigDecimal.valueOf(flowDataList.getD());
-            BigDecimal originalU = BigDecimal.valueOf(flowDataList.getU());
-            BigDecimal newD = originalD.multiply(trafficRatio);
-            BigDecimal newU = originalU.multiply(trafficRatio);
-            flowDataList.setD(newD.longValue() * tunnel.getFlow());
-            flowDataList.setU(newU.longValue() * tunnel.getFlow());
+            long rawD = flowData.getD() == null ? 0L : flowData.getD();
+            long rawU = flowData.getU() == null ? 0L : flowData.getU();
+            long newD = rawD;
+            long newU = rawU;
+            if (trafficRatio.compareTo(BigDecimal.ONE) != 0) {
+                newD = BigDecimal.valueOf(rawD).multiply(trafficRatio).longValue();
+                newU = BigDecimal.valueOf(rawU).multiply(trafficRatio).longValue();
+            }
+
+            // 流量方向处理（1=单向 2=双向）
+            flowData.setD(newD * tunnel.getFlow());
+            flowData.setU(newU * tunnel.getFlow());
         }
 
         // 记录实时速率（内存滑动窗口，不落库）
-        recordRealtimeRate(forwardId, userId, forward, flowDataList);
+        recordRealtimeRate(forwardId, userId, forward, flowData);
 
-        // 先更新所有流量统计 - 确保流量数据的一致性
-        updateForwardFlow(forwardId, flowDataList);
-        updateUserFlow(userId, flowDataList);
-        updateUserTunnelFlow(userTunnelId, flowDataList);
-
-        // 7. 检查和服务暂停操作
-        String name = buildServiceName(forwardId, userId, userTunnelId);
-        if (!Objects.equals(userTunnelId, DEFAULT_USER_TUNNEL_ID)) { // 非管理员的转发需要检测流量限制
-            checkUserRelatedLimits(userId, name);
-            checkUserTunnelRelatedLimits(userTunnelId, name, userId);
+        // 按实体累加增量，同一批次内同一个转发/用户/用户隧道只产生一条 UPDATE
+        accumulate(batch.forwardDeltas, forwardId, flowData.getD(), flowData.getU());
+        accumulate(batch.userDeltas, userId, flowData.getD(), flowData.getU());
+        if (!Objects.equals(userTunnelId, DEFAULT_USER_TUNNEL_ID)) {
+            accumulate(batch.tunnelDeltas, userTunnelId, flowData.getD(), flowData.getU());
         }
 
+        batch.events.add(new FlowEvent(forwardId, userId, userTunnelId,
+                buildServiceName(forwardId, userId, userTunnelId), flowData.getD(), flowData.getU()));
+    }
+
+    /**
+     * 同一批次内复用转发查询结果（含"查不到"的结果，避免对已删除转发反复查库）
+     */
+    private Forward resolveForward(BatchContext batch, String forwardId) {
+        if (batch.missingForwards.contains(forwardId)) {
+            return null;
+        }
+        Forward cached = batch.forwards.get(forwardId);
+        if (cached != null) {
+            return cached;
+        }
+        Forward forward = forwardService.getById(forwardId);
+        if (forward == null) {
+            batch.missingForwards.add(forwardId);
+        } else {
+            batch.forwards.put(forwardId, forward);
+        }
+        return forward;
+    }
+
+    /**
+     * 同一批次内复用隧道查询结果
+     */
+    private Tunnel resolveTunnel(BatchContext batch, Integer tunnelId) {
+        if (batch.missingTunnels.contains(tunnelId)) {
+            return null;
+        }
+        Tunnel cached = batch.tunnels.get(tunnelId);
+        if (cached != null) {
+            return cached;
+        }
+        Tunnel tunnel = tunnelService.getById(tunnelId);
+        if (tunnel == null) {
+            batch.missingTunnels.add(tunnelId);
+        } else {
+            batch.tunnels.put(tunnelId, tunnel);
+        }
+        return tunnel;
+    }
+
+    private void accumulate(Map<String, long[]> target, String key, long in, long out) {
+        long[] sums = target.computeIfAbsent(key, k -> new long[2]);
+        sums[0] += in;
+        sums[1] += out;
+    }
+
+    /**
+     * 把本批次聚合后的增量一次性写库。
+     * 增量为 0 的实体直接跳过：原来是每条上报都执行一次 UPDATE ... + 0，对结果没有影响。
+     */
+    private void flushFlows(BatchContext batch) {
+        for (Map.Entry<String, long[]> entry : batch.forwardDeltas.entrySet()) {
+            long in = entry.getValue()[0];
+            long out = entry.getValue()[1];
+            if (in == 0 && out == 0) {
+                continue;
+            }
+            synchronized (getForwardLock(entry.getKey())) {
+                forwardService.update(null, new UpdateWrapper<Forward>()
+                        .eq("id", entry.getKey())
+                        .setSql("in_flow = in_flow + " + in)
+                        .setSql("out_flow = out_flow + " + out));
+            }
+        }
+        for (Map.Entry<String, long[]> entry : batch.userDeltas.entrySet()) {
+            long in = entry.getValue()[0];
+            long out = entry.getValue()[1];
+            if (in == 0 && out == 0) {
+                continue;
+            }
+            synchronized (getUserLock(entry.getKey())) {
+                userService.update(null, new UpdateWrapper<User>()
+                        .eq("id", entry.getKey())
+                        .setSql("in_flow = in_flow + " + in)
+                        .setSql("out_flow = out_flow + " + out));
+            }
+        }
+        for (Map.Entry<String, long[]> entry : batch.tunnelDeltas.entrySet()) {
+            long in = entry.getValue()[0];
+            long out = entry.getValue()[1];
+            if (in == 0 && out == 0) {
+                continue;
+            }
+            synchronized (getTunnelLock(entry.getKey())) {
+                userTunnelService.update(null, new UpdateWrapper<UserTunnel>()
+                        .eq("id", entry.getKey())
+                        .setSql("in_flow = in_flow + " + in)
+                        .setSql("out_flow = out_flow + " + out));
+            }
+        }
+    }
+
+    /**
+     * 限额/到期/状态检查。
+     * <p>
+     * 写库已经按批次聚合，但检查必须仍然按"处理到该条消息时"的累计值判断，
+     * 否则原本由第 N 条消息触发的暂停会提前到第 1 条（暂停命令里的服务名会变）。
+     * 因此这里用 批次末值 − 本批增量 反推出批次起点，再按消息顺序累加还原。
+     */
+    private void checkLimits(BatchContext batch) {
+        if (batch.events.isEmpty()) {
+            return;
+        }
+
+        Map<String, User> userSnapshots = new HashMap<>();
+        Map<String, Long> userRunning = new HashMap<>();
+        Map<String, Long> tunnelRunning = new HashMap<>();
+        Map<String, UserTunnel> tunnelSnapshots = new HashMap<>();
+
+        for (FlowEvent event : batch.events) {
+            // 与原实现一致：管理员的转发（userTunnelId = 0）不参与流量限额/到期检查
+            if (Objects.equals(event.userTunnelId, DEFAULT_USER_TUNNEL_ID)) {
+                continue;
+            }
+
+            // 用户维度
+            if (!userSnapshots.containsKey(event.userId)) {
+                User user = userService.getById(event.userId);
+                userSnapshots.put(event.userId, user);
+                if (user != null) {
+                    long batchTotal = totalOf(batch.userDeltas.get(event.userId));
+                    userRunning.put(event.userId, user.getInFlow() + user.getOutFlow() - batchTotal);
+                }
+            }
+            User user = userSnapshots.get(event.userId);
+            if (user != null) {
+                long current = userRunning.get(event.userId) + event.total();
+                userRunning.put(event.userId, current);
+                long userFlowLimit = user.getFlow() * BYTES_TO_GB;
+                // 与原实现一致：用户维度命中任一条就停止本维度后续判断，但用户隧道维度仍要继续检查
+                userCheck:
+                {
+                    if (userFlowLimit < current) {
+                        pauseAllUserServices(event.userId, event.name);
+                        break userCheck;
+                    }
+                    if (user.getExpTime() != null && user.getExpTime() <= System.currentTimeMillis()) {
+                        pauseAllUserServices(event.userId, event.name);
+                        break userCheck;
+                    }
+                    if (user.getStatus() != 1) {
+                        pauseAllUserServices(event.userId, event.name);
+                    }
+                }
+            }
+
+            // 用户隧道维度
+            if (!tunnelSnapshots.containsKey(event.userTunnelId)) {
+                UserTunnel userTunnel = userTunnelService.getById(event.userTunnelId);
+                tunnelSnapshots.put(event.userTunnelId, userTunnel);
+                if (userTunnel != null) {
+                    long batchTotal = totalOf(batch.tunnelDeltas.get(event.userTunnelId));
+                    tunnelRunning.put(event.userTunnelId,
+                            userTunnel.getInFlow() + userTunnel.getOutFlow() - batchTotal);
+                }
+            }
+            UserTunnel userTunnel = tunnelSnapshots.get(event.userTunnelId);
+            if (userTunnel == null) {
+                continue;
+            }
+            long current = tunnelRunning.get(event.userTunnelId) + event.total();
+            tunnelRunning.put(event.userTunnelId, current);
+            if (current >= userTunnel.getFlow() * BYTES_TO_GB) {
+                pauseSpecificForward(userTunnel.getTunnelId(), event.name, event.userId);
+                continue;
+            }
+            if (userTunnel.getExpTime() != null && userTunnel.getExpTime() <= System.currentTimeMillis()) {
+                pauseSpecificForward(userTunnel.getTunnelId(), event.name, event.userId);
+                continue;
+            }
+            if (userTunnel.getStatus() != 1) {
+                pauseSpecificForward(userTunnel.getTunnelId(), event.name, event.userId);
+            }
+        }
     }
 
     /**
@@ -280,29 +486,46 @@ public class FlowController extends BaseController {
         }
     }
 
-    private void checkUserRelatedLimits(String userId, String name) {
+    private long totalOf(long[] sums) {
+        return sums == null ? 0L : sums[0] + sums[1];
+    }
 
-        // 重新查询用户以获取最新的流量数据
-        User updatedUser = userService.getById(userId);
-        if (updatedUser == null) return;
+    /**
+     * 单批次采集上下文：查询缓存 + 增量聚合 + 逐条事件（用于还原限额触发时机）
+     */
+    private static class BatchContext {
+        final Map<String, Forward> forwards = new HashMap<>();
+        final Set<String> missingForwards = new HashSet<>();
+        final Map<Integer, Tunnel> tunnels = new HashMap<>();
+        final Set<Integer> missingTunnels = new HashSet<>();
+        final Map<String, long[]> forwardDeltas = new LinkedHashMap<>();
+        final Map<String, long[]> userDeltas = new LinkedHashMap<>();
+        final Map<String, long[]> tunnelDeltas = new LinkedHashMap<>();
+        final List<FlowEvent> events = new ArrayList<>();
+    }
 
-        // 检查用户总流量限制
-        long userFlowLimit = updatedUser.getFlow() * BYTES_TO_GB;
-        long userCurrentFlow = updatedUser.getInFlow() + updatedUser.getOutFlow();
-        if (userFlowLimit < userCurrentFlow) {
-            pauseAllUserServices(userId, name);
-            return;
+    /**
+     * 单条上报事件的增量（用于按消息顺序还原累计值）
+     */
+    private static class FlowEvent {
+        final String forwardId;
+        final String userId;
+        final String userTunnelId;
+        final String name;
+        final long inDelta;
+        final long outDelta;
+
+        FlowEvent(String forwardId, String userId, String userTunnelId, String name, long inDelta, long outDelta) {
+            this.forwardId = forwardId;
+            this.userId = userId;
+            this.userTunnelId = userTunnelId;
+            this.name = name;
+            this.inDelta = inDelta;
+            this.outDelta = outDelta;
         }
 
-        // 检查用户到期时间
-        if (updatedUser.getExpTime() != null && updatedUser.getExpTime() <= new Date().getTime()) {
-            pauseAllUserServices(userId, name);
-            return;
-        }
-
-        // 检查用户状态
-        if (updatedUser.getStatus() != 1) {
-            pauseAllUserServices(userId, name);
+        long total() {
+            return inDelta + outDelta;
         }
     }
 
@@ -349,61 +572,21 @@ public class FlowController extends BaseController {
         }
     }
 
-    private void updateForwardFlow(String forwardId, FlowDto flowStats) {
-        // 对相同转发的流量更新进行同步，避免并发覆盖
-        synchronized (getForwardLock(forwardId)) {
-            UpdateWrapper<Forward> updateWrapper = new UpdateWrapper<>();
-            updateWrapper.eq("id", forwardId);
-            updateWrapper.setSql("in_flow = in_flow + " + flowStats.getD());
-            updateWrapper.setSql("out_flow = out_flow + " + flowStats.getU());
-
-            forwardService.update(null, updateWrapper);
-        }
-    }
-
-    private void updateUserFlow(String userId, FlowDto flowStats) {
-        // 对相同用户的流量更新进行同步，避免并发覆盖
-        synchronized (getUserLock(userId)) {
-            UpdateWrapper<User> updateWrapper = new UpdateWrapper<>();
-            updateWrapper.eq("id", userId);
-
-            updateWrapper.setSql("in_flow = in_flow + " + flowStats.getD());
-            updateWrapper.setSql("out_flow = out_flow + " + flowStats.getU());
-
-            userService.update(null, updateWrapper);
-        }
-    }
-
-    private void updateUserTunnelFlow(String userTunnelId, FlowDto flowStats) {
-        if (Objects.equals(userTunnelId, DEFAULT_USER_TUNNEL_ID)) {
-            return; // 默认隧道不需要更新，返回成功
-        }
-
-        // 对相同用户隧道的流量更新进行同步，避免并发覆盖
-        synchronized (getTunnelLock(userTunnelId)) {
-            UpdateWrapper<UserTunnel> updateWrapper = new UpdateWrapper<>();
-            updateWrapper.eq("id", userTunnelId);
-            updateWrapper.setSql("in_flow = in_flow + " + flowStats.getD());
-            updateWrapper.setSql("out_flow = out_flow + " + flowStats.getU());
-            userTunnelService.update(null, updateWrapper);
-        }
-    }
-
     private Object getUserLock(String userId) {
-        return USER_LOCKS.computeIfAbsent(userId, k -> new Object());
+        return USER_LOCKS[Math.floorMod(userId.hashCode(), LOCK_STRIPES)];
     }
 
     private Object getTunnelLock(String userTunnelId) {
-        return TUNNEL_LOCKS.computeIfAbsent(userTunnelId, k -> new Object());
+        return TUNNEL_LOCKS[Math.floorMod(userTunnelId.hashCode(), LOCK_STRIPES)];
     }
 
     private Object getForwardLock(String forwardId) {
-        return FORWARD_LOCKS.computeIfAbsent(forwardId, k -> new Object());
+        return FORWARD_LOCKS[Math.floorMod(forwardId.hashCode(), LOCK_STRIPES)];
     }
 
     private boolean isValidNode(String secret) {
-        int nodeCount = nodeService.count(new QueryWrapper<Node>().eq("secret", secret));
-        return nodeCount > 0;
+        // 优化：只需要判断存在性，用 LIMIT 1 命中即返回，替代 count(*) 的整表匹配计数
+        return nodeService.existsBySecret(secret);
     }
 
     private String[] parseServiceName(String serviceName) {
