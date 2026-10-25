@@ -95,6 +95,21 @@ curl -X POST http://<面板>:6365/api/v1/forward-flow/ranking \
   -d '{"range":"today"}'
 ```
 
+## 六之二、镜像一致性校验（2026-10-25 17:40，针对 Docker Hub 线上镜像）
+
+直接拉取线上镜像核对，而不是只看 CI 绿灯：
+
+| 检查项 | 结果 |
+| --- | --- |
+| Docker Hub tag 推送时间 | backend `2026-10-25T07:45Z`、frontend `2026-10-25T07:47Z`（= 15:45/15:47 北京时间，对应最后一次 CI） |
+| 镜像内前端产物 | `index-CRnZUPsq.js` 同时命中 `流量排行` / `forward-flow/ranking` 与 `flow-rate/current` |
+| 镜像内后端路由 | 起容器后 `POST /api/v1/forward-flow/ranking` → `{"code":401,...}`（路由存在）；`POST /api/v1/not-exist-xyz` → HTTP 404（对照） |
+| 建表 | 容器首启即自动创建 `forward_flow_statistics`（与 `statistics_flow` 并存） |
+| 多架构 | `docker manifest inspect` → `amd64` + `arm64` |
+| manifest digest | backend `sha256:09657903f1139cb41fd5d0126655bf8b2…`、frontend `sha256:90372b9a9e7682a12a58dd2f4bd2c374a…` |
+
+> 注意：本项目异常统一由 `@RestControllerAdvice` 包装为 `R`，**HTTP 状态码恒为 200**，鉴权失败体现在响应体 `code=401`。用 `curl -w '%{http_code}'` 判断登录态会误判为"通过"。
+
 ## 七、审查结论
 
 代码可以上线运行。**M1 已修复（CI 不再因标签存在而静默跳过构建）；M2 属分支管理动作，合并到 main 后需同步改安装脚本 URL**。L1-L6 与上游 4 项按排期加固即可，不阻塞当前使用。

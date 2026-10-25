@@ -9,6 +9,10 @@ on:
     branches:
       - main
       - feat/port-traffic-ranking
+    # 纯文档改动不重建镜像（多架构构建约 10 分钟），需要时用 workflow_dispatch 手动触发
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
   workflow_dispatch:
 
 jobs:
