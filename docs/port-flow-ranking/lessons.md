@@ -290,6 +290,15 @@
     本次故障正是卡在 ③：宿主映射有了，容器内 nginx 没监听 IPv6，表现为 reset 而不是 timeout，容易误判成防火墙。
     通用：是。
 
+## K. 转发链与诊断的坑（2026-10-25 补）
+
+| # | 现象 | 根因 | 处理 | 通用性 |
+|---|---|---|---|---|
+| 47 | 面板「转发诊断/隧道诊断」全部显示成功、延迟正常，但实际端口不通 | `performTcpPingDiagnosis` 在节点只回 `OK` 却没带探测数据、或数据解析失败时，直接 `setSuccess(true)`；诊断测的是**数据库里的端口**，不是节点上实际生效的端口 | 抽 `TcpPingDiagnosisRunner`：只有节点明确回 `success=true` 才算连通，其余如实报失败 | 是——任何"面板显示正常但实际不通"都要先怀疑诊断本身在说谎 |
+| 48 | 节点上残留旧转发链，面板改端口后节点仍拨旧端口（日志 `hop_15 → [2400:...]:58781 connection refused`） | `GostUtil.AddChains` 把 gost 返回的 `chain xxx already exists` 直接改写成 `OK` 吞掉，节点侧旧链不覆盖 | 改为：检测到 `already exists` 就下发 `UpdateChains` 覆盖；返回 `not found` 则退回 `AddChains` | 是——"幂等写"接口里把 exists 当成功，等于放弃了更新 |
+| 49 | 同一跳多个节点名重复 | `node.put("name", "node_" + chainTunnel.getInx())`，入口/出口的 `inx` 为 null → 全部叫 `node_null` | 节点名改为 `node_<下标>_<c{inx}\|n{nodeId}>` | 是——用可空字段拼唯一键，必然踩 |
+| 50 | 节点日志 `dial tcp x.x.x.x:6365: connect: no route to host` | 不是端口拒绝（那是 `connection refused`），是网络层不可达：安全组/防火墙 reject、或该 IP 已不指向面板 | 先确认面板公网 IP 是否变化，再查安全组 6365、`ufw`/`iptables` | 是——`refused` 查服务，`no route to host` 查网络与 IP |
+
 ## J. 下次的 30 分钟快速通道
 
 1. 钉输入（仓库/tag/单元/口径）→ clone + 建分支（5 分钟）
