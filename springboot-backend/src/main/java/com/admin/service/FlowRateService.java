@@ -8,6 +8,7 @@ import com.admin.entity.ForwardPort;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -24,6 +25,11 @@ import java.util.Set;
  */
 @Service
 public class FlowRateService {
+
+    /**
+     * 端口速率排行展示条数
+     */
+    public static final int TOP_FORWARD_LIMIT = 10;
 
     private final RealtimeFlowTracker realtimeFlowTracker;
 
@@ -73,8 +79,10 @@ public class FlowRateService {
         dto.setActiveForwardCount(rates.size());
         dto.setActiveUserCount(activeUsers.size());
 
-        if (!rates.isEmpty()) {
-            dto.setTopForward(buildTopForward(rates.get(0)));
+        List<FlowRateTopDto> topForwards = buildTopForwards(rates);
+        dto.setTopForwards(topForwards);
+        if (!topForwards.isEmpty()) {
+            dto.setTopForward(topForwards.get(0));
         }
         if (admin) {
             dto.setTopUser(buildTopUser(rates));
@@ -83,30 +91,52 @@ public class FlowRateService {
     }
 
     /**
-     * 最忙端口：补全转发名称与入口端口，转发已删除时只展示 ID
+     * 速率最高的若干个端口：按总速率降序取前 {@link #TOP_FORWARD_LIMIT} 条，
+     * 转发与端口信息各用一次批量查询补全，避免轮询接口产生 N+1 查询。
+     * 转发已删除时名称回退为「转发#ID」，端口为空。
      */
-    private FlowRateTopDto buildTopForward(RealtimeFlowTracker.ForwardRate rate) {
-        FlowRateTopDto top = new FlowRateTopDto();
-        top.setForwardId(rate.getForwardId());
-        top.setUserId(rate.getUserId());
-        top.setUserName(rate.getUserName());
-        top.setTotalRate(rate.getTotalRate());
-        top.setInRate(rate.getInRate());
-        top.setOutRate(rate.getOutRate());
-
-        Forward forward = forwardService.getById(rate.getForwardId());
-        top.setForwardName(forward == null ? "转发#" + rate.getForwardId() : forward.getName());
-        if (forward != null) {
-            List<ForwardPort> ports = forwardPortService.list(
-                    new QueryWrapper<ForwardPort>()
-                            .eq("forward_id", rate.getForwardId())
-                            .orderByAsc("id")
-            );
-            if (!ports.isEmpty()) {
-                top.setPort(ports.get(0).getPort());
-            }
+    private List<FlowRateTopDto> buildTopForwards(List<RealtimeFlowTracker.ForwardRate> rates) {
+        if (rates.isEmpty()) {
+            return new ArrayList<>();
         }
-        return top;
+        List<RealtimeFlowTracker.ForwardRate> limited = rates.size() > TOP_FORWARD_LIMIT
+                ? rates.subList(0, TOP_FORWARD_LIMIT)
+                : rates;
+
+        List<Long> forwardIds = new ArrayList<>(limited.size());
+        for (RealtimeFlowTracker.ForwardRate rate : limited) {
+            forwardIds.add(rate.getForwardId());
+        }
+
+        Map<Long, String> forwardNames = new HashMap<>();
+        for (Forward forward : forwardService.listByIds(forwardIds)) {
+            forwardNames.put(forward.getId(), forward.getName());
+        }
+
+        Map<Long, Integer> forwardPorts = new HashMap<>();
+        List<ForwardPort> ports = forwardPortService.list(
+                new QueryWrapper<ForwardPort>()
+                        .in("forward_id", forwardIds)
+                        .orderByAsc("id")
+        );
+        for (ForwardPort port : ports) {
+            forwardPorts.putIfAbsent(port.getForwardId(), port.getPort());
+        }
+
+        List<FlowRateTopDto> topForwards = new ArrayList<>(limited.size());
+        for (RealtimeFlowTracker.ForwardRate rate : limited) {
+            FlowRateTopDto top = new FlowRateTopDto();
+            top.setForwardId(rate.getForwardId());
+            top.setUserId(rate.getUserId());
+            top.setUserName(rate.getUserName());
+            top.setTotalRate(rate.getTotalRate());
+            top.setInRate(rate.getInRate());
+            top.setOutRate(rate.getOutRate());
+            top.setForwardName(forwardNames.getOrDefault(rate.getForwardId(), "转发#" + rate.getForwardId()));
+            top.setPort(forwardPorts.get(rate.getForwardId()));
+            topForwards.add(top);
+        }
+        return topForwards;
     }
 
     /**

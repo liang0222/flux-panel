@@ -2,6 +2,8 @@ package com.admin.common.dto;
 
 import lombok.Data;
 
+import java.util.List;
+
 /**
  * <p>
  * 实时速率
@@ -65,9 +67,14 @@ public class FlowRateDto {
     private Integer activeUserCount;
 
     /**
-     * 最忙端口
+     * 最忙端口（等于 topForwards 的第一项，保留以兼容旧前端）
      */
     private FlowRateTopDto topForward;
+
+    /**
+     * 速率最高的若干端口，按总速率降序，最多 {@code FlowRateService.TOP_FORWARD_LIMIT} 条
+     */
+    private List<FlowRateTopDto> topForwards;
 
     /**
      * 最高用户（仅管理员范围返回）

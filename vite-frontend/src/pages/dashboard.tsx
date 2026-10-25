@@ -80,6 +80,7 @@ interface FlowRateInfo {
   activeForwardCount: number;
   activeUserCount: number;
   topForward?: FlowRateTop | null;
+  topForwards?: FlowRateTop[] | null;
   topUser?: FlowRateTop | null;
 }
 
@@ -830,31 +831,54 @@ export default function DashboardPage() {
                </div>
              </div>
 
-             {(flowRate?.topForward || flowRate?.topUser) && (
-               <div className="flex flex-wrap items-center gap-x-8 gap-y-2 mt-3 pt-3 border-t border-divider">
-                 {flowRate?.topForward && (
-                   <div className="flex items-center gap-2 min-w-0">
-                     <span className="text-xs text-default-500 flex-shrink-0">最忙端口</span>
-                     <span className="text-sm text-foreground truncate">
-                       {flowRate.topForward.forwardName}
-                       {flowRate.topForward.port ? `:${flowRate.topForward.port}` : ''}
+             {flowRate?.topForwards && flowRate.topForwards.length > 0 && (
+               <div className="mt-3 pt-3 border-t border-divider">
+                 <div className="flex items-center justify-between gap-3 mb-2">
+                   <span className="text-xs text-default-500 flex-shrink-0">
+                     端口速率 Top {flowRate.topForwards.length}
+                   </span>
+                   {flowRate?.topUser && (
+                     <span className="text-xs text-default-500 truncate">
+                       最高用户{' '}
+                       <span className="text-foreground">
+                         {flowRate.topUser.userName || `用户#${flowRate.topUser.userId}`}
+                       </span>{' '}
+                       <span className="font-medium">{formatSpeed(flowRate.topUser.totalRate)}</span>
                      </span>
-                     <span className="text-xs font-medium text-default-500 flex-shrink-0">
-                       {formatSpeed(flowRate.topForward.totalRate)}
-                     </span>
-                   </div>
-                 )}
-                 {flowRate?.topUser && (
-                   <div className="flex items-center gap-2 min-w-0">
-                     <span className="text-xs text-default-500 flex-shrink-0">最高用户</span>
-                     <span className="text-sm text-foreground truncate">
-                       {flowRate.topUser.userName || `用户#${flowRate.topUser.userId}`}
-                     </span>
-                     <span className="text-xs font-medium text-default-500 flex-shrink-0">
-                       {formatSpeed(flowRate.topUser.totalRate)}
-                     </span>
-                   </div>
-                 )}
+                   )}
+                 </div>
+                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
+                   {flowRate.topForwards.map((item, index) => {
+                     const maxRate = flowRate.topForwards?.[0]?.totalRate || 0;
+                     const width = maxRate > 0 ? Math.max(4, ((item.totalRate || 0) / maxRate) * 100) : 0;
+                     return (
+                       <div
+                         key={`${item.forwardId}-${index}`}
+                         className="relative flex items-center gap-2 min-w-0 py-0.5 rounded overflow-hidden"
+                         title={`入站 ${formatSpeed(item.inRate)} · 出站 ${formatSpeed(item.outRate)}`}
+                       >
+                         <div
+                           className="absolute inset-y-0 left-0 bg-primary/10 dark:bg-primary/20"
+                           style={{ width: `${width}%` }}
+                         ></div>
+                         <span
+                           className={`relative w-4 text-[11px] tabular-nums text-right flex-shrink-0 ${
+                             index < 3 ? 'text-primary font-semibold' : 'text-default-400'
+                           }`}
+                         >
+                           {index + 1}
+                         </span>
+                         <span className="relative text-xs text-foreground truncate min-w-0 flex-1">
+                           {item.forwardName || `转发#${item.forwardId}`}
+                           {item.port ? `:${item.port}` : ''}
+                         </span>
+                         <span className="relative text-[11px] font-medium text-default-500 tabular-nums flex-shrink-0">
+                           {formatSpeed(item.totalRate)}
+                         </span>
+                       </div>
+                     );
+                   })}
+                 </div>
                </div>
              )}
            </CardBody>
