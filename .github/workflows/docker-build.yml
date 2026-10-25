@@ -35,12 +35,22 @@ jobs:
           if git rev-parse "${{ env.VERSION }}" >/dev/null 2>&1; then
             echo "Tag ${{ env.VERSION }} already exists"
             echo "tag_exists=true" >> $GITHUB_OUTPUT
-            echo "should_build=false" >> $GITHUB_OUTPUT
-            
-            # 检查从tag到现在，go-gost目录下的文件是否有变化
+
+            # 检查从tag到现在，面板源码（后端/前端）是否有变化
             TAG_COMMIT=$(git rev-list -n 1 "${{ env.VERSION }}")
             echo "Tag commit: $TAG_COMMIT"
             echo "Current HEAD: $(git rev-parse HEAD)"
+
+            # 标签存在不等于镜像是最新的：只要面板源码相对标签有改动就必须重建，
+            # 否则推送新代码后流水线仍然显示成功，但镜像仓库里还是旧镜像。
+            if git diff --quiet --ignore-all-space --ignore-blank-lines $TAG_COMMIT HEAD -- springboot-backend/ vite-frontend/ 2>/dev/null; then
+              echo "✅ Panel sources unchanged since tag (no content changes)"
+              echo "should_build=false" >> $GITHUB_OUTPUT
+            else
+              echo "🔄 Detected changes in panel sources since tag, will rebuild:"
+              git diff --stat $TAG_COMMIT HEAD -- springboot-backend/ vite-frontend/ || true
+              echo "should_build=true" >> $GITHUB_OUTPUT
+            fi
             
             # 检查 go-gost 目录下是否有实际的文件内容变化
             # 使用 --ignore-all-space 和 --ignore-blank-lines 来忽略空白差异

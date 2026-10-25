@@ -145,7 +145,9 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 
 ### 必做（交给用户决定）
 
-1. ~~提交代码~~ 已完成（全部提交已推送到 GitHub，最新 `a87ca57`）。
+1. ~~提交代码~~ 已完成（全部提交已推送到 GitHub，最新 `9ce14d6`）。
+1b. **合并到 `main` 后同步改一键安装 URL**：`panel_install.sh:11-12` 现在写死 `refs/heads/feat/port-traffic-ranking`，分支删除/改名会让一键安装 404（详见 `code-review.md` M2）。
+1c. ~~CI 标签陷阱~~ 已修复：`docker-build.yml` 改为按面板源码相对标签是否有改动决定构建，不再因标签存在而静默跳过（详见 `code-review.md` M1）。
 2. **服务器部署**：直接跑 README 里的「面板端（开发版）」命令，或用 `deploy/docker-compose.registry.yml` 拉取镜像启动。
 3. **视觉走查补充**：已用 Playwright 在真实 Docker 栈上截了暗色「仪表盘实时速率」和「流量排行」（见截图一节），仍建议补看**浅色主题、窄屏/手机布局、空态与错误态、按钮交互**。
 4. **GitHub Actions（可选）**：工作流里的镜像名仍是 `bqlpfy/*`，要自动构建需改成 `ahmadplayz721/*` 并配 secrets，见 `github-dockerhub.md` 第 15 节。
