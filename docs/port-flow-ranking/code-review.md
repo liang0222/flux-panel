@@ -36,6 +36,7 @@ fi
 ```
 
 - 验证：`yaml.safe_load` 通过、jobs 与 `if` 条件未变；本地模拟两条分支——tag≠HEAD（37 文件差异）→ `should_build=true`；tag==HEAD → `should_build=false`（不会重复构建）。
+- 线上验证：提交 `25bf1e9` 推送后 CI run [40172843038](https://github.com/liang0222/flux-panel/actions/runs/40172843038) **success**，`check-version` 判定 `should_build=true`，后端（14 步）与前端（11 步）均实际重建并推送镜像。
 
 ### M2. 一键安装脚本把分支名写死为 `feat/port-traffic-ranking`（合并后需处理）
 
