@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| GitHub | https://github.com/liang0222/flux-panel （分支 `feat/port-traffic-ranking`，最新 `9ce14d6`） |
+| GitHub | https://github.com/liang0222/flux-panel （分支 `feat/port-traffic-ranking`，最新 `fc1db1a`） |
 | Docker Hub | `ahmadplayz721` |
 | 后端镜像 | `docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta` |
 | 前端镜像 | `docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta` |
@@ -20,7 +20,7 @@
 | --- | --- |
 | [prompt.md](prompt.md) | 完整任务 Prompt：排行榜需求 + 实时速率追加需求（可直接粘给新会话） |
 | [handoff.md](handoff.md) | 交接说明：现状、环境、已完成、待办、关键决策、自测、已知限制 |
-| [lessons.md](lessons.md) | 踩坑与解法（46 条）+ 通用步骤与需替换项清单 |
+| [lessons.md](lessons.md) | 踩坑与解法（50 条）+ 通用步骤与需替换项清单 |
 | [code-review.md](code-review.md) | 全面代码审查报告（HEAD 9ce14d6）：结论、2 项中等风险、6 项轻微、4 项上游继承风险 |
 | [deploy-and-publish.md](deploy-and-publish.md) | 部署与发布：本地源码构建 / 离线镜像 / 镜像仓库 / 裸机 |
 | [github-dockerhub.md](github-dockerhub.md) | 用自己的 GitHub + Docker Hub 发布与部署（提交 → 建仓库 → 推镜像 → 服务器拉取 → CI） |
@@ -30,15 +30,15 @@
 
 > 截图均为真实 Docker 栈 + Playwright 渲染，**流量数据是脚本模拟的**，不是真实用户数据。
 
-## 当前状态（2026-10-24 16:40）
+## 当前状态（2026-10-25 18:00）
 
 - 功能：端口转发流量排行（5 分钟采集 / 区间聚合 / 管理员页） + 仪表盘实时速率（10 秒内存窗口 / 2 秒轮询 / 按角色隔离）。
 - 验证：后端 47 个测试全绿；前端 `npm run build` 通过；真实 Docker 部署、接口、重启、删转发、离线镜像 `save/load` 均验证过；页面已截图。
-- 代码：已提交 9 个 commit 并推送到 GitHub（`liang0222/flux-panel`，最新 `9ce14d6`），工作区干净。
-- 审查：2026-10-25 完成全面代码审查，见 [code-review.md](code-review.md)；无阻断缺陷，2 项运维级风险待处理（CI 标签陷阱、安装脚本写死分支）。
-- 镜像：已推送到 Docker Hub（`ahmadplayz721`，tag `2.0.7-beta`）。
+- 代码：共 17 个 commit（相对 tag `2.0.7-beta`）已推送到 GitHub（`liang0222/flux-panel`，最新 `fc1db1a`），工作区干净。
+- 审查：2026-10-25 完成全面代码审查，见 [code-review.md](code-review.md)；无阻断缺陷。CI 标签陷阱（M1）已修复并线上验证；仅剩 M2（安装脚本写死分支）待合并到 `main` 时处理。
+- 镜像：已推送到 Docker Hub（`ahmadplayz721`，tag `2.0.7-beta` + `latest`，amd64/arm64 双架构），并拉取核对过镜像内确含新代码（见 code-review.md「镜像一致性校验」）。
 - 部署：`deploy/` 下有拉镜像（registry）、源码构建、离线 tar 三种方式；仓库根目录的 `panel_install.sh` / `install.sh` 已改为本仓库地址。
-- CI：`.github/workflows/docker-build.yml` 已改为构建 `ahmadplayz721/*` 镜像，secrets 已配置，推送到 `feat/port-traffic-ranking` 或 `main` 自动构建。
+- CI：`.github/workflows/docker-build.yml` 构建 `ahmadplayz721/*` 镜像，secrets 已配置；推送到 `feat/port-traffic-ranking` 或 `main` 自动构建（纯文档改动已跳过，需要时用 `workflow_dispatch` 手动触发）。
 
 ## 下一步
 

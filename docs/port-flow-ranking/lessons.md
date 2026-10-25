@@ -254,6 +254,26 @@
     先 `git status` 找被覆盖/新增的文件 → `git checkout -- <file>` 还原、`rm` 掉生成物 → 检查常驻服务是否被重启（`ps -o lstart -p <pid>`、`systemctl status <svc>`）→ 确认配置 mtime 未变。
     通用：是。
 
+47. **统一响应包装会把 HTTP 状态码"抹平"，用 `%{http_code}` 判鉴权会误判**
+    现象：本项目所有异常由 `@RestControllerAdvice` 包成 `R{code,msg,ts,data}`，**HTTP 状态恒为 200**；未登录/无效 token 只是响应体 `code=401`。用 `curl -o /dev/null -w '%{http_code}'` 探测，会得到 200 而误以为"接口没鉴权"。
+    解法：校验时看**响应体**（`python3 -c 'json.load(...)["code"]'`）或断言 `$.code == 401`；只有"路由不存在"才是真的 HTTP 404，可拿它做对照。
+    通用：是（任何统一返回体的后端）。
+
+48. **CI 用"标签是否存在"决定要不要构建 = 静默发布旧镜像**
+    现象：`if git rev-parse "$VERSION"; then should_build=false`，一旦标签推到仓库，后续 push 全部跳过构建，流水线仍显示 success，`docker pull` 拿到的是旧镜像，且没有任何报错。
+    解法：判定条件改为"源码相对标签是否有差异"（`git diff --quiet $TAG HEAD -- <源码目录>`），差异存在就重建；本地用 `tag==HEAD` 与 `tag!=HEAD` 两条分支各验证一次。验证线上时别只看绿灯，要 `docker pull` 后核对产物（类/JS 片段/路由/建表）。
+    通用：是。
+
+49. **纯文档提交也会触发镜像重建，白烧 CI 时间**
+    现象：多架构构建约 10 分钟，改一行 README 就重建一次。
+    解法：`on.push.paths-ignore: ['docs/**', '**.md']`，需要时用 `workflow_dispatch` 手动跑。注意：**本次若改了 workflow 文件本身，paths-ignore 不会生效**，仍会跑一轮。
+    通用：是。
+
+50. **给容器做临时验证时，别忘了 compose 里挂的卷**
+    现象：`docker run` 起后端镜像直接 `SQLException: path to '/app/data/gost.db': '/app/data' does not exist`——因为 compose 用 `sqlite_data:/app/data` 建了目录，裸 `docker run` 没有。
+    解法：验证时显式 `-v /tmp/xxx:/app/data -e DB_PATH=/app/data/gost.db -e LOG_DIR=/app/logs -e JWT_SECRET=...`；用完 `docker rm -f` + 删临时目录。
+    通用：是。
+
 ## J. 下次的 30 分钟快速通道
 
 1. 钉输入（仓库/tag/单元/口径）→ clone + 建分支（5 分钟）

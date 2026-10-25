@@ -9,7 +9,7 @@
 | --- | --- |
 | GitHub 用户名 | `liang0222` |
 | 代码仓库 | https://github.com/liang0222/flux-panel |
-| 已推送分支 | `feat/port-traffic-ranking`（5 个提交，最新 `b8e42ad`） |
+| 已推送分支 | `feat/port-traffic-ranking`（17 个提交，最新 `fc1db1a`） |
 | Docker Hub 用户名 | `ahmadplayz721` |
 | 后端镜像 | `docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta` |
 | 前端镜像 | `docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta` |
