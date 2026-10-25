@@ -5,7 +5,7 @@
 
 ## 一句话现状
 
-两期功能都已实现并验证：**端口流量排行** + **仪表盘实时速率**（48 个后端测试、前端构建、真实 Docker 部署与页面渲染截图）。代码已提交并推送到 **GitHub `liang0222/flux-panel`**（`feat/port-traffic-ranking` 分支头），镜像已推送到 **Docker Hub `ahmadplayz721`**（`2.0.7-beta` / `latest`，amd64+arm64，已拉取核对镜像内确含新代码）；2026-10-25 做过一轮全面代码审查（`code-review.md`），无阻断缺陷。剩余工作只有服务器部署、合并到 `main` 时改安装 URL、可选的体验补充和上线观察。
+两期功能都已实现并验证：**端口流量排行** + **仪表盘实时速率**（66 个后端测试、前端构建、真实 Docker 部署与页面渲染截图）。代码已提交并推送到 **GitHub `liang0222/flux-panel`**（`feat/port-traffic-ranking` 分支头），镜像已推送到 **Docker Hub `ahmadplayz721`**（`2.0.7-beta` / `latest`，amd64+arm64，已拉取核对镜像内确含新代码）；2026-10-25 做过一轮全面代码审查（`code-review.md`），无阻断缺陷。剩余工作只有服务器部署、合并到 `main` 时改安装 URL、可选的体验补充和上线观察。
 
 ## 代码位置与状态
 
@@ -89,7 +89,7 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 | `service/FlowRateIntegrationTest` | 3 | 真实上报 → 接口、用户隔离、401、非法密钥 |
 | `src/test/resources/logback-test.xml` | - | 让测试不依赖 `LOG_DIR` |
 
-验证记录：`mvn -B clean test package` → **Tests run: 47, Failures: 0, Errors: 0，BUILD SUCCESS**；`npm run build` → 通过。
+验证记录：`mvn -B clean test package` → **Tests run: 66, Failures: 0, Errors: 0，BUILD SUCCESS**；`npm run build` → 通过。
 
 ### 真实运行冒烟（已完成，临时库已删）
 
@@ -120,7 +120,7 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 - 面板 IPv6 双栈：`docker-compose-v6.yml` 的后端 6365 / 前端 80 同时绑定 `0.0.0.0` 与 `[::]`（只写 `[::]` 会变成纯 IPv6）；`vite-frontend/nginx.conf` 的 server 块补 `listen [::]:80;`（自定义主配置不 include conf.d，基础镜像的 IPv6 监听原本失效）。
 - 节点侧：`GostUtil.processServerAddress` 已会自动给 IPv6 加方括号，`install.sh` 的地址校验正则也接受 `[addr]:port`，agent 的 URL 是字符串拼接，方括号形式可直接用；面板「网站配置」的地址说明已补 IPv6 写法提示。
 - 实时速率范围：管理员本来就是 `scope=all`（`currentRates(null)` 不过滤用户），新增用例 `adminOwnForwardIsVisibleToAdmin` 固定该行为（管理员自建转发 `9401_1_0` 的 4000 B/s 计入管理员视图）。
-- 验证：后端 48 测试全绿；本地起 v6 compose（16365/16366）实测 `ss` 同时出现 `0.0.0.0:` 与 `[::]:`，IPv4/IPv6 访问后端与前端均 200（修 nginx 前 IPv6 前端为 reset）。
+- 验证：后端 66 测试全绿；本地起 v6 compose（16365/16366）实测 `ss` 同时出现 `0.0.0.0:` 与 `[::]:`，IPv4/IPv6 访问后端与前端均 200（修 nginx 前 IPv6 前端为 reset）。
 
 ## 本轮新增：仪表盘「实时速率」（2026-10-21）
 
@@ -138,13 +138,32 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 
 **前端**：[dashboard.tsx](../../vite-frontend/src/pages/dashboard.tsx) 在 4 张统计卡下方新增「实时速率」卡（总速率 Mbit/s、入站/出站条与占比、最忙端口、最高用户、最近上报时间），2 秒轮询、页面隐藏时暂停、失败保留上次值；[api/index.ts](../../vite-frontend/src/api/index.ts) 增加 `getCurrentFlowRate()`。
 
-**测试**：`RealtimeFlowTrackerTest`(9)、`FlowRateServiceTest`(4)、`FlowRateIntegrationTest`(3，真实 `/flow/upload` → 接口 → 角色隔离)。后端合计 **47** 个测试。
+**测试**：`RealtimeFlowTrackerTest`(9)、`FlowRateServiceTest`(4，现 6)、`FlowRateIntegrationTest`(3，真实 `/flow/upload` → 接口 → 角色隔离)。后端合计 **47** 个测试（现 66）。
 
 **注意**：实时速率只存在内存，服务重启后从零重新累积；节点每 5 秒上报一次，10 秒窗口足以覆盖最近两次上报。
 
 **截图**：[dashboard-realtime-card.png](dashboard-realtime-card.png)（卡片）、[dashboard-realtime-dark.png](dashboard-realtime-dark.png)（整页）、[ranking-today.png](ranking-today.png)（流量排行页，模拟 6 个端口的数据）。采集方式：真实 Docker 栈 + 两个端口模拟上报（31.2 + 8.0 Mbit/s）+ Playwright 无头 Chromium 注入管理员 token；图中数字为**模拟流量**，不是真实用户数据。
 
 **排行页排版修复（2026-10-21 14:07）**：「统计区间」卡片原来用 `break-all` 把结束时间折成 `14:0 / 5`，改为两行「开始 … / 结束 …」。
+
+## 本轮新增：实时速率「前十个端口」排行（2026-10-26）
+
+需求：实时速率卡原来只有「最忙端口」一条，改成能看到**前十个端口各自的速率**。
+
+**后端**
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/dto/FlowRateDto.java` | 新增 `topForwards`（按总速率降序，最多 10 条）；`topForward` 保留 = 列表第一项，旧前端不受影响 |
+| `service/FlowRateService.java` | 新增 `TOP_FORWARD_LIMIT = 10` 与 `buildTopForwards`：**一次 `listByIds` + 一次 `in(forward_id)`** 批量补名称与端口，再内存 group；不再逐条 `getById`（2 秒轮询 × N 条会变成 N+1） |
+
+**前端**：[dashboard.tsx](../../vite-frontend/src/pages/dashboard.tsx) 实时速率卡底部改为「端口速率 Top N」双列列表：名次（前三高亮）、`名称:端口`、速率、按第一名归一化的浅色占比条；`title` 悬停显示入/出站明细；「最高用户」移到列表标题右侧（仅管理员有值）。
+
+**测试**：`FlowRateServiceTest` 4 → 6 例，新增「只取前 10 条且保持降序、批量查询各一次」「同一转发多端口只取第一个」。后端合计 **66** 个测试全绿。
+
+**验证**：本机 jar（临时 SQLite + 12 个模拟转发，每 2 秒持续上报）→ 接口返回 `activeForwardCount=12`、`topForwards` 恰好 10 条且降序；Playwright 截图见 [dashboard-top10.png](dashboard-top10.png)（数据为脚本模拟）。
+
+**注意**：列表长度随活跃端口数变化（≤10），无流量时不渲染该区块；排行仍然只统计 10 秒窗口内有上报的转发。
 
 **Docker 冒烟（2026-10-21 11:31~11:33）**：容器内造一次 `/flow/upload`（入站 620000、出站 4000）→ 接口返回 `totalRate=62400 B/s`、入站 62000（99.36%）、出站 400（0.64%）；管理员 `scope=all`、用户 2 `scope=self` 同值、用户 3 为 0；轮询接口无访问日志；镜像已重新导出为 201MB tar。
 
@@ -224,7 +243,7 @@ DB_PATH=/tmp/smoke/gost.db JWT_SECRET=smoke-secret LOG_DIR=/tmp/smoke/logs \
 ## 交接检查清单
 
 - [ ] `git status` 确认改动范围与本文一致
-- [ ] `mvn -B test` 全绿（47）
+- [ ] `mvn -B test` 全绿（66）
 - [ ] `npm run build` 通过
 - [ ] 确认没有把 `/tmp`、`target/`、`dist/` 提交进去
 - [ ] 确认 `docs/port-flow-ranking/` 是否随代码提交

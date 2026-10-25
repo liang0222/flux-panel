@@ -26,14 +26,15 @@
 | [github-dockerhub.md](github-dockerhub.md) | 用自己的 GitHub + Docker Hub 发布与部署（提交 → 建仓库 → 推镜像 → 服务器拉取 → CI） |
 | [ranking-today.png](ranking-today.png) | 流量排行页实拍（暗色，6 个模拟端口） |
 | [dashboard-realtime-card.png](dashboard-realtime-card.png) | 仪表盘「实时速率」卡片实拍 |
+| [dashboard-top10.png](dashboard-top10.png) | 仪表盘「实时速率」前十个端口速率排行实拍（12 个模拟端口） |
 | [dashboard-realtime-dark.png](dashboard-realtime-dark.png) | 仪表盘整页实拍（暗色） |
 
 > 截图均为真实 Docker 栈 + Playwright 渲染，**流量数据是脚本模拟的**，不是真实用户数据。
 
-## 当前状态（2026-10-25 18:50）
+## 当前状态（2026-10-26 01:30）
 
-- 功能：端口转发流量排行（5 分钟采集 / 区间聚合 / 管理员页） + 仪表盘实时速率（10 秒内存窗口 / 2 秒轮询 / 按角色隔离，管理员可见含自己在内的全部用户） + 面板 IPv6 双栈访问。
-- 验证：后端 48 个测试全绿；前端 `npm run build` 通过；真实 Docker 部署、接口、重启、删转发、离线镜像 `save/load` 均验证过；页面已截图。
+- 功能：端口转发流量排行（5 分钟采集 / 区间聚合 / 管理员页） + 仪表盘实时速率（10 秒内存窗口 / 2 秒轮询 / 按角色隔离，管理员可见含自己在内的全部用户；卡片内含**前十个端口速率排行**） + 面板 IPv6 双栈访问。
+- 验证：后端 66 个测试全绿；前端 `npm run build` 通过；真实 Docker 部署、接口、重启、删转发、离线镜像 `save/load` 均验证过；页面已截图。
 - 代码：相对 tag `2.0.7-beta` 共 18+ 个 commit 已推送到 GitHub（`liang0222/flux-panel`，`feat/port-traffic-ranking`），工作区干净。
 - 审查：2026-10-25 完成全面代码审查，见 [code-review.md](code-review.md)；无阻断缺陷。CI 标签陷阱（M1）已修复并线上验证；仅剩 M2（安装脚本写死分支）待合并到 `main` 时处理。
 - 镜像：已推送到 Docker Hub（`ahmadplayz721`，tag `2.0.7-beta` + `latest`，amd64/arm64 双架构），并拉取核对过镜像内确含新代码（见 code-review.md「镜像一致性校验」）。
