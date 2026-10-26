@@ -27,6 +27,7 @@
 | [github-dockerhub.md](github-dockerhub.md) | 用自己的 GitHub + Docker Hub 发布与部署（提交 → 建仓库 → 推镜像 → 服务器拉取 → CI） |
 | [ranking-today.png](ranking-today.png) | 流量排行页实拍（暗色，6 个模拟端口） |
 | [dashboard-realtime-card.png](dashboard-realtime-card.png) | 仪表盘「实时速率」卡片实拍 |
+| [ranking-published-image.png](ranking-published-image.png) | 用 Docker Hub 上的镜像全新部署后，真实上报 1.5 MB 流量、等两个 5 分钟采集周期后的排行页实拍（数据来自真实上报，不是模拟） |
 | [dashboard-top10.png](dashboard-top10.png) | 仪表盘「实时速率」前十个端口速率排行实拍（12 个模拟端口） |
 | [dashboard-realtime-dark.png](dashboard-realtime-dark.png) | 仪表盘整页实拍（暗色） |
 

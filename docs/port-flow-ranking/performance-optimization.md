@@ -127,7 +127,7 @@ Tests run: 86, Failures: 0, Errors: 0, Skipped: 0   BUILD SUCCESS
 - Playwright 真实登录（admin_user）后逐页访问 `/dashboard`、`/flow-ranking`、`/forward`、`/node`、`/tunnel`、`/user`：全部渲染，**0 console error、0 HTTP 4xx/5xx**，懒加载分包按需加载；
 - `POST /flow/upload?secret=perfsecret` 上报 `u=100000,d=200000`（隧道 flow=2 双向）→ 转发计数器 `in_flow=400000, out_flow=200000`（与旧实现换算一致）；
 - `POST /api/v1/flow-rate/current` → `totalRate=60000, inRate=40000, outRate=20000, inPercent=66.67`；
-- `POST /api/v1/forward-flow/ranking {"rangeCode":"today"}` → `code=0`，`range=today`、`startTime=2026-10-26 00:00`、`sampleIntervalMinutes=5`、`retentionDays=31`、`trafficScope=in+out`。
+- `POST /api/v1/forward-flow/ranking {"range":"today"}`（请求字段名是 `range`，不是 `rangeCode`）→ `code=0`，`range=today`、`startTime=2026-10-26 00:00`、`sampleIntervalMinutes=5`、`retentionDays=31`、`trafficScope=in+out`。
 
 ---
 
@@ -144,3 +144,20 @@ Tests run: 86, Failures: 0, Errors: 0, Skipped: 0   BUILD SUCCESS
 | 回滚 | 改动集中在 4 个后端文件 + 2 个前端文件，无表结构/接口变更 | `git revert` 对应提交即可，无需数据迁移 |
 
 **部署影响**：无数据库迁移、无配置项变更、无接口变更。升级只需替换后端 jar 与前端 dist（或重新拉镜像）。
+
+---
+
+## 附：发布镜像端到端验证（2026-10-26 12:40–12:53）
+
+用 Docker Hub 上的镜像（`ahmadplayz721/flux-panel-*:2.0.7-beta`，CI 构建的 amd64+arm64 双架构）在干净卷上全新部署，验证发布产物本身可用：
+
+| 检查项 | 结果 |
+|--------|------|
+| 拉取并启动 | 后端 `healthy`，前端 nginx 200，`forward_flow_statistics` 表自动建好 |
+| 真实登录 + 页面 | `admin_user` 登录后 `/dashboard`、`/flow-ranking`、`/forward`、`/node`、`/tunnel`、`/user` 全部渲染，**0 console error / 0 HTTP 4xx-5xx** |
+| 镜像内代码 | 后端 jar 含 `JwtUtil.PARSED_CACHE/VERIFIED_CACHE`、`FlowController.BatchContext/STRIPES`、`NodeMapper.existsBySecret`；前端 22 个分包、首屏 `index.js` 1.19 MB |
+| 5 分钟采集 | 12:45 写基线（计数器 1200000/600000，增量 0，被排行过滤）；12:50 写增量 **in 1000000 / out 500000**，`total_flow=3300000` |
+| 排行接口 | `today` → 总量 **1500000**；`3d` 起点 2026-10-24、`7d` 起点 2026-10-20、`30d` 起点 2026-09-27，均为 00:00（Asia/Shanghai） |
+| 排行页 | 显示 1.43 MB（入站 976.56 KB / 出站 488.28 KB）、采集点 2、最近采集 12:50，见 [ranking-published-image.png](ranking-published-image.png) |
+
+> 请求字段名是 `range`（`{"range":"3d"}`），不是 `rangeCode`。
