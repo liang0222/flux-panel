@@ -704,3 +704,57 @@ git commit -m "docs: 生产实测的内存审计、根因分析、优化报告�
 ```
 
 > `deploy/journald-flux.conf` 建议**不提交**或标注为"可选模板"——生产实测 journal 仅 84.1 MB，该模板无收益（见 §10）。
+
+---
+
+## 17. 提交与发布记录（2026-10-30）
+
+### 17.1 Git
+
+分支 `perf/memory-optimization`，基于 `feat/port-traffic-ranking` @ `3907d1f`，
+共 4 个提交，已推送到 `https://github.com/liang0222/flux-panel`：
+
+| 提交 | 内容 |
+|---|---|
+| `256e04f` | perf(go): 限制 agent 堆上限并让核心包可测试 |
+| `47aa969` | perf(java): 消除转发列表 N+1 查询并修正两处从未生效的配置键 |
+| `a497270` | perf(deploy): 调整 JVM 初始堆、补容器日志轮转、新增 journald 模板 |
+| `63d5027` | docs: 新增内存审计与性能优化完整报告（八份） |
+
+拆分原则：按语言/关注点分组，每组可独立回滚。
+
+### 17.2 Docker Hub
+
+```
+ahmadplayz721/flux-panel-backend:2.0.7-beta                        digest b9d3ae94ca37
+ahmadplayz721/flux-panel-backend:2.0.7-beta-perf-20261030          digest b9d3ae94ca37
+```
+
+同一 digest 打了两个 tag：`2.0.7-beta` 供现有 compose 直接引用，
+`-perf-20261030` 作为带日期的可追溯快照。
+
+### 17.3 生产部署
+
+```
+docker pull ahmadplayz721/flux-panel-backend:2.0.7-beta
+docker compose up -d --force-recreate backend
+```
+
+结果：`healthy`，`restarts=0`，启动耗时 7.537s。
+Java 内存 482.1 MiB → 351.9 MiB，堆 committed 262,144 K → 78,848 K。
+
+### 17.4 回滚
+
+```bash
+# 回滚到旧镜像（旧镜像仍在本地，未被删除）
+cd /root && docker compose stop backend
+docker tag <旧镜像ID> ahmadplayz721/flux-panel-backend:2.0.7-beta
+docker compose up -d --force-recreate backend
+
+# 回滚 git
+git revert --no-commit 63d5027 a497270 47aa969 256e04f
+git commit -m "revert: 回滚内存优化改动"
+```
+
+**注意**：`docker tag` 覆盖本地 tag 不影响 Docker Hub 上已推送的镜像，
+Hub 上仍是新版本。若要连 Hub 一起回退，需重新 push 旧镜像。
