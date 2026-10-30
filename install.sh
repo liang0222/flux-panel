@@ -16,28 +16,74 @@ get_architecture() {
     esac
 }
 
-# 构建下载地址
+# ---- 下载源配置 ----
+# 主下载源：本仓库发布的自建二进制。
+# 相对上游的差异：内置 GOMEMLIMIT 堆软上限（缺省 1200MiB，可用 GOMEMLIMIT 或
+# FLUX_AGENT_MEMLIMIT 覆盖，off/0 关闭）、service 包不再 log.Fatal（可单元测试）、
+# -V 版本输出可用、修正两处 fmt.Println 格式化动词误用。业务逻辑与上游一致。
+AGENT_REPO="liang0222/flux-panel"
+AGENT_RELEASE_TAG="2.0.7-beta-perf"
+# 备用下载源：上游同版本二进制。本仓库 Release 不可达时自动回退，
+# 保证安装不因单一下载源故障而中断（此时不含上述自建改进）。
+UPSTREAM_REPO="bqlpfy/flux-panel"
+UPSTREAM_RELEASE_TAG="2.0.7-beta"
+
+# 构建主下载地址（可用 FLUX_AGENT_RELEASE_BASE 指向自建镜像）
 build_download_url() {
     local ARCH=$(get_architecture)
-    # 节点二进制与上游 2.0.7-beta 完全一致；如需完全自托管，可改为自己的 Releases 地址
-    echo "https://github.com/bqlpfy/flux-panel/releases/download/2.0.7-beta/gost-${ARCH}"
+    local BASE="${FLUX_AGENT_RELEASE_BASE:-https://github.com/${AGENT_REPO}/releases/download}"
+    echo "${BASE}/${AGENT_RELEASE_TAG}/gost-${ARCH}"
+}
+
+# 构建备用下载地址
+build_fallback_url() {
+    local ARCH=$(get_architecture)
+    echo "https://github.com/${UPSTREAM_REPO}/releases/download/${UPSTREAM_RELEASE_TAG}/gost-${ARCH}"
 }
 
 # 下载地址
 DOWNLOAD_URL=$(build_download_url)
+FALLBACK_URL=$(build_fallback_url)
 INSTALL_DIR="/etc/flux_agent"
-# Go 运行时堆软上限。Go 1.19+ 的运行时原生读取 GOMEMLIMIT，
-# 无需重新编译二进制，对本脚本下载的上游 release 同样生效。
+# Go 运行时堆软上限，写入 systemd 单元的 Environment=GOMEMLIMIT。
 # 作用：超过该值后 GC 会更积极回收，避免长时间运行后 RSS 无界增长。
+# 注意：主源二进制已内置同样的缺省值（1200MiB），此处显式设置是为
+#       (1) 回退到上游二进制时仍然生效；(2) 让 systemctl show 能直接看到当前值。
 # 可用环境变量覆盖：FLUX_AGENT_MEMLIMIT=900MiB ./install.sh
 MEM_LIMIT="${FLUX_AGENT_MEMLIMIT:-1200MiB}"
-COUNTRY=$(curl -s https://ipinfo.io/country)
+COUNTRY=$(curl -s --max-time 10 https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
-    # 拼接 URL
+    # 国内网络直连 GitHub Releases 常失败，统一走加速前缀（主/备地址都加）
     DOWNLOAD_URL="https://ghfast.top/${DOWNLOAD_URL}"
+    FALLBACK_URL="https://ghfast.top/${FALLBACK_URL}"
 fi
 
+# 按顺序尝试的下载地址：主源 -> 备源 -> 主源直连（仅国内代理场景下作为兜底）
+DOWNLOAD_CANDIDATES="$DOWNLOAD_URL $FALLBACK_URL"
+if [ "$COUNTRY" = "CN" ]; then
+    DOWNLOAD_CANDIDATES="$DOWNLOAD_CANDIDATES $(build_download_url)"
+fi
 
+# 下载节点二进制到指定路径。
+# 依次尝试各候选地址，任一成功即返回 0；全部失败返回 1。
+# 使用 curl -f，使 404/5xx 直接判为失败，避免把错误页当成二进制保存。
+download_agent() {
+    local dest="$1"
+    local url
+    for url in $DOWNLOAD_CANDIDATES; do
+        [ -z "$url" ] && continue
+        echo "⬇️ 尝试下载: $url"
+        if curl -fL --connect-timeout 15 --max-time 300 "$url" -o "$dest" 2>/dev/null; then
+            if [ -s "$dest" ]; then
+                echo "✅ 下载成功"
+                return 0
+            fi
+        fi
+        echo "⚠️ 该地址不可用，尝试下一个"
+        rm -f "$dest"
+    done
+    return 1
+}
 
 # 显示菜单
 show_menu() {
@@ -196,8 +242,7 @@ install_flux_agent() {
 
   # 下载 flux_agent
   echo "⬇️ 下载 flux_agent 中..."
-  curl -L "$DOWNLOAD_URL" -o "$INSTALL_DIR/flux_agent"
-  if [[ ! -f "$INSTALL_DIR/flux_agent" || ! -s "$INSTALL_DIR/flux_agent" ]]; then
+  if ! download_agent "$INSTALL_DIR/flux_agent"; then
     echo "❌ 下载失败，请检查网络或下载链接。"
     exit 1
   fi
@@ -320,8 +365,7 @@ update_flux_agent() {
   
   # 先下载新版本
   echo "⬇️ 下载最新版本..."
-  curl -L "$DOWNLOAD_URL" -o "$INSTALL_DIR/flux_agent.new"
-  if [[ ! -f "$INSTALL_DIR/flux_agent.new" || ! -s "$INSTALL_DIR/flux_agent.new" ]]; then
+  if ! download_agent "$INSTALL_DIR/flux_agent.new"; then
     echo "❌ 下载失败。"
     return 1
   fi
