@@ -251,8 +251,8 @@ Docker Hub 并在生产强制重建，重启 0 次，健康检查 `healthy`。
 
 | 指标 | 部署前（旧镜像） | 部署后（新镜像） | 说明 |
 |---|---:|---:|---|
-| Java `docker stats` | 482.1 MiB | **351.9 MiB** | 启动 25s 时 320.6 MiB，随堆按需扩张到 351.9 |
-| Java `VmRSS` | — | 377,844 kB | — |
+| Java `docker stats` | 482.1 MiB | **319.9 MiB** | 重建后稳定值；中间曾观测 320.6 / 351.9 MiB，随堆按需扩张 |
+| Java `VmRSS` | — | 342,744 kB | — |
 | Java `Pss_Anon` | — | 355,004 kB | — |
 | Java `AnonHugePages` | — | 73,728 kB | 优化前为 538,624 kB |
 | **Java 堆 committed** | 262,144 K | **78,848 K（77 MiB）** | 降 183 MiB，`-Xms64m` 生效 |
@@ -398,3 +398,25 @@ curl -s -X POST http://127.0.0.1:6365/api/v1/user/login \
    且 pprof 的 relay goroutine 组数与 `ss` 的连接数严格 1:1，不存在滞留。
 
 **在这些数据补齐之前，本报告只声明：Java 堆 −164 MiB 是已证实的结构性收益；其余为待验证。**
+
+---
+
+## 9. 最终状态（2026-10-30 13:30 CST）
+
+| 项目 | 数值 |
+|---|---|
+| 后端容器 | `springboot-backend`，`Up (healthy)`，`restarts=0` |
+| 后端内存 | **319.9 MiB**（优化前 613.8 MiB） |
+| 前端容器 | `vite-frontend`，`Up`，2.688 MiB |
+| agent | `flux_agent` `active`，`VmRSS 111,744 kB`（优化前 2,672,112 kB） |
+| agent 监听端口 | **117**（106 业务 + 11 其他，全部保留） |
+| 宿主 `used` | 1,185 MiB（优化前 4.0 GiB） |
+| 宿主 `MemAvailable` | 6,754 MiB（优化前 3,997,512 kB ≈ 3.8 GiB） |
+| 宿主 PSI | `some/full` 全 `0.00` |
+| IPv4 / IPv6 | 前后端四个入口全部 **200** |
+| 鉴权 | 未带 token 访问 `/forward/list` → **401** |
+| 节点数据 | `node` 表 2 条，`status=1`，agent WS 已重连成功 |
+| Docker 日志轮转 | **已生效**：`{"max-file":"3","max-size":"10m"}` |
+
+> 重启期间 agent 出现约 10 秒的 `connection refused` 并自动重连，
+> 说明 agent 的 WS 重连机制正常工作（这也是**没有做破坏性改动**的佐证）。
