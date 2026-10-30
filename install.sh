@@ -26,6 +26,11 @@ build_download_url() {
 # 下载地址
 DOWNLOAD_URL=$(build_download_url)
 INSTALL_DIR="/etc/flux_agent"
+# Go 运行时堆软上限。Go 1.19+ 的运行时原生读取 GOMEMLIMIT，
+# 无需重新编译二进制，对本脚本下载的上游 release 同样生效。
+# 作用：超过该值后 GC 会更积极回收，避免长时间运行后 RSS 无界增长。
+# 可用环境变量覆盖：FLUX_AGENT_MEMLIMIT=900MiB ./install.sh
+MEM_LIMIT="${FLUX_AGENT_MEMLIMIT:-1200MiB}"
 COUNTRY=$(curl -s https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
     # 拼接 URL
@@ -236,6 +241,8 @@ After=network.target
 [Service]
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/flux_agent
+# 堆软上限：防止长时间运行后内存无界增长（Go 运行时原生支持，无需改二进制）
+Environment="GOMEMLIMIT=$MEM_LIMIT"
 Restart=on-failure
 
 [Install]
@@ -276,6 +283,28 @@ EOF
 }
 
 # 更新功能
+# 确保 systemd 单元中存在 GOMEMLIMIT（供老节点升级时补上，幂等）
+ensure_service_memory_limit() {
+  local svc="/etc/systemd/system/flux_agent.service"
+  [[ -f "$svc" ]] || return 0
+  if grep -q '^Environment="GOMEMLIMIT=' "$svc"; then
+    # 已存在：按当前 MEM_LIMIT 刷新数值
+    sed -i "s|^Environment=\"GOMEMLIMIT=.*\"$|Environment=\"GOMEMLIMIT=$MEM_LIMIT\"|" "$svc"
+  else
+    # 不存在：插到 ExecStart 之后（用 awk 避免 sed a\ 的转义问题）
+    awk -v lim="$MEM_LIMIT" '
+      /^ExecStart=/ {
+        print
+        print "# 堆软上限：防止长时间运行后内存无界增长（Go 运行时原生支持，无需改二进制）"
+        print "Environment=\"GOMEMLIMIT=" lim "\""
+        next
+      }
+      { print }
+    ' "$svc" > "$svc.tmp" && mv "$svc.tmp" "$svc"
+  fi
+  systemctl daemon-reload
+}
+
 update_flux_agent() {
   echo "🔄 开始更新 flux_agent..."
   
@@ -309,6 +338,9 @@ update_flux_agent() {
   
   # 打印版本
   echo "🔎 新版本：$($INSTALL_DIR/flux_agent -V)"
+
+  # 补齐内存上限（老节点升级时同样生效）
+  ensure_service_memory_limit
 
   # 重启服务
   echo "🔄 重启服务..."
