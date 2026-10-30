@@ -24,6 +24,17 @@ import java.util.Map;
 @Slf4j
 public class LogAspect {
 
+    /**
+     * 请求参数日志的最大保留长度。
+     *
+     * 背景：/flow/upload 每 5 秒被节点调用一次，参数是 AES 加密后的 base64 密文，
+     * 单条可达数十 KB。生产实测该端点使 springboot-backend 的 json 日志以
+     * 约 336 KB/分钟（19 MB/小时、约 462 MB/天）增长，而密文本身无法用于排查。
+     * 这里做通用截断：正常业务的短参数完全不受影响，只压缩超长载荷，
+     * 同时保留原长度与开头片段，仍可判断「有没有收到请求、载荷有多大」。
+     */
+    private static final int MAX_PARAM_LOG_LEN = 1000;
+
     @Pointcut("@annotation(com.admin.common.aop.LogAnnotation)")
     public void pt() {
 
@@ -71,7 +82,7 @@ public class LogAspect {
         
 
         // 获取请求参数
-        String requestParams = getRequestParams(joinPoint);
+        String requestParams = truncateForLog(getRequestParams(joinPoint));
         
         // 获取返回参数
         String responseParams = returnValue != null ? JSON.toJSONString(returnValue) : "无返回值";
@@ -126,7 +137,7 @@ public class LogAspect {
 
             
             // 获取请求参数
-            String requestParams = getRequestParams(joinPoint);
+            String requestParams = truncateForLog(getRequestParams(joinPoint));
             
             // 获取异常信息
             String exceptionMsg = ex != null ? ex.getMessage() : "未知异常";
@@ -189,5 +200,17 @@ public class LogAspect {
         } catch (Exception e) {
             return "获取参数失败: " + e.getMessage();
         }
+    }
+
+    /**
+     * 截断过长的请求参数，避免超长载荷（如加密后的流量上报）撑爆日志文件。
+     * 未超长时原样返回，行为与改造前完全一致。
+     */
+    private static String truncateForLog(String params) {
+        if (params == null || params.length() <= MAX_PARAM_LOG_LEN) {
+            return params;
+        }
+        return params.substring(0, MAX_PARAM_LOG_LEN)
+                + "...(已截断，原长度 " + params.length() + " 字符)";
     }
 }

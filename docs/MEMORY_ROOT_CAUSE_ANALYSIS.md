@@ -885,3 +885,105 @@ curl -s "http://127.0.0.1:6060/debug/pprof/heap?debug=1" > /tmp/heap_t0.txt
 **不要把本节读成「已找到泄漏点」或「已证明无泄漏」。**
 它是把「无泄漏迹象」这个过强的结论，修正为「内存随连接数变化、
 能被部分回收、老进程确有未解释的累积、需 24 小时数据定性」。
+
+---
+
+## 12. 第三轮复核（15:44）：THP 对 RSS 的放大，以及一个真实的数据可靠性缺陷
+
+### 12.1 Java 容器从 320 MB 涨到 440 MB 的原因不是泄漏
+
+| 指标 | 数值 | 说明 |
+|---|---|---|
+| G1 堆 total | 99,328 K | committed，非最大堆 |
+| G1 堆 used | 52,768 K | 实际存活对象 |
+| Metaspace used / committed | 67,729 K / 68,352 K | 无 classloader 泄漏（chunks 只增不减会是泄漏特征，此处正常） |
+| 线程数 | 46 | 与早前 47 一致 |
+| **VmRSS** | **466,912 kB** | 进程驻留 |
+| RssAnon | 441,104 kB | 匿名内存 |
+| **AnonHugePages** | **364,544 kB** | **其中约 356 MB 是透明大页** |
+| cgroup memory.current | 479,887,360 B | ≈458 MiB |
+
+堆 99 MB + 元空间 67 MB = 166 MB，但 RssAnon 是 441 MB。
+差额主要由 `AnonHugePages` 解释：宿主机 `transparent_hugepage/enabled` 为 **`[always]`**，
+JVM 申请 2 MB 大页后即使对象被回收，大页也不会立即拆分归还。
+
+**结论**：这是 THP 的 RSS 放大效应，不是 Java 堆泄漏。
+`-Xms64m` 降低了启动提交量，但 G1 运行期仍会扩展堆区间并触发大页分配，
+所以 RSS 仍会回涨到 400 MB 量级。**不能把 320→440 MB 记为「优化失效」。**
+
+同一现象也出现在 agent 上：RssAnon 268,736 kB 中有 161,792 kB 是大页。
+
+### 12.2 若要让 RSS 更贴近真实占用，可选措施（未执行）
+
+以下都会改变宿主机或 JVM 行为，需单独决策，本次**未执行**：
+
+1. 宿主机把 THP 改为 `madvise`：`echo madvise > /sys/kernel/mm/transparent_hugepage/enabled`
+   ——全局影响所有进程（含 MySQL/Redis 等），不建议为单个服务改动。
+2. JVM 加 `-XX:-UseTransparentHugePages`：只影响本 JVM，但会失去大页带来的 TLB 收益。
+3. 维持现状：THP 提升性能，RSS 数字偏大但**没有内存压力**
+   （`/proc/pressure/memory` 的 some/full 在 avg10/60/300 上全为 0.00）。
+
+### 12.3 发现并修复的真实缺陷：SQLite busy_timeout 只作用于一条连接
+
+这是本轮排查中**唯一确认的数据可靠性问题**，与内存无关，但会造成流量统计丢失。
+
+**现象**（生产实测）：
+```
+SQLITE_BUSY: The database file is locked (database is locked)
+### SQL: UPDATE forward SET in_flow = in_flow + 602, out_flow = out_flow + 3916 WHERE (id = ?)
+### The error may involve com.admin.mapper.ForwardMapper.update-Inline
+```
+24 小时内命中 2 次（05:59:45、05:59:50，均在容器启动后 30 分钟内）。
+
+**根因**：`springboot-backend/src/main/java/com/admin/config/SQLiteConfig.java:40` 写了
+```java
+statement.execute("PRAGMA busy_timeout=5000;");
+```
+但 `PRAGMA busy_timeout` 是**连接级**设置。`SQLiteConfig.run()` 只从池里取用**一条**连接，
+在那条连接上生效；连接归还后，HikariCP 池中其余连接仍是驱动默认值。
+
+**驱动实测**（sqlite-jdbc 3.45.0.0，用同版本 jar 直接验证）：
+```
+带 busy_timeout 参数 -> PRAGMA busy_timeout = 5000
+不带参数           -> PRAGMA busy_timeout = 3000
+```
+即默认并非 0 而是 3000 ms。因此问题不是「完全不等锁」，而是
+**等待 3 秒仍拿不到写锁**——说明当时有较长的写事务或 checkpoint 争用。
+把 URL 参数设为 5000 是**把等待窗口放宽到 5 秒**，属于缓解而非根治。
+
+**已做修改**（`springboot-backend/src/main/resources/application.yml`，保留 CRLF）：
+```yaml
+url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}?busy_timeout=5000
+```
+写在 URL 上由驱动对**每条**新建连接生效，不再依赖某一条连接的偶然状态。
+
+**为什么这条不是「已经修好」**：真正的长写锁来源尚未定位。
+`flushFlows()` 用 `synchronized(getForwardLock(id))` 做 JVM 级串行，
+但 HikariCP 允许 10 条连接并发写同一个 SQLite 文件；加上每 5 分钟的
+`wal_checkpoint(TRUNCATE)` 需要独占，二者叠加可能造成秒级阻塞。
+要定位需在故障时刻抓 `PRAGMA` 与慢查询，**目前没有抓到**，属**未验证**。
+
+### 12.4 上报失败不丢数据（已验证）
+
+`go-gost/x/service/global_traffic_manager.go:142-155` 的逻辑：
+```go
+success, err := sendBatchTrafficReport(m.ctx, reportItems)
+if err != nil { fmt.Printf("❌ 全局流量上报失败: ..."); return }   // 不清空
+if !success { fmt.Printf("⚠️ 全局流量上报未成功 ..."); return }    // 不清空
+m.clearReportedTraffic(reportData)                                  // 仅成功时清空
+```
+失败时**不清空已累计流量**，下一轮会带着重试。24 小时内 23 次失败
+（20 次 HTTP 超时 + 3 次服务器响应异常）**不会造成流量丢失**，只会延后入库。
+这一点此前文档未说明，容易误判为数据丢失。
+
+### 12.5 当前生产整体状态（15:44）
+
+| 指标 | 数值 |
+|---|---|
+| 宿主 used / available | 1,548 MB / 6,391 MB |
+| PSI memory some/full (avg10) | 0.00 / 0.00 |
+| agent MemoryCurrent | 342,482,944 B（≈327 MB），HWM 310 MB |
+| Java 容器 | docker stats 440.9 MiB（VmRSS 466 MB，含 356 MB THP） |
+| 前端容器 | 2.7 MiB |
+| 最近 10 分钟上报失败 | 0 |
+| SQLITE_BUSY（24h） | 2 次，集中在启动后 30 分钟 |

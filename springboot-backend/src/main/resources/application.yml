@@ -1,7 +1,12 @@
 spring:
   datasource:
     driver-class-name: org.sqlite.JDBC
-    url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}
+    # busy_timeout 必须写在 URL 里：SQLiteConfig 里那条 PRAGMA busy_timeout=5000
+    # 只作用于它自己取到的那一条连接，池中其余连接仍是默认值 0（立即返回 SQLITE_BUSY）。
+    # 生产实测：流量上报并发写 forward 表时出现
+    #   SQLITE_BUSY: The database file is locked (database is locked)
+    # 导致整批流量统计丢失。写在 URL 上由驱动对每条新连接生效。
+    url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}?busy_timeout=5000
     # 说明：原配置写的是 max-pool-size，HikariConfig 只有 setMaximumPoolSize，
     # 该键无法绑定，Spring Boot 会静默忽略，实际一直走 Hikari 默认值 10。
     # 生产实测确认：容器启动日志出现
