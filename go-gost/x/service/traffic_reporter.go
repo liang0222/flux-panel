@@ -19,6 +19,35 @@ var httpReportURL string
 var configReportURL string
 var httpAESCrypto *crypto.AESCrypto // 新增：HTTP上报加密器
 
+// 复用同一个 http.Client / Transport：
+// 原实现每次上报（每 5 秒一次）都新建 &http.Client{}，虽然底层仍复用
+// http.DefaultTransport，但会重复分配 Client 结构、且无法自定义连接复用与
+// 空闲连接上限。改为包级单例后，连接可稳定复用，减少每 5 秒一次的临时对象。
+var (
+	trafficReportClient = &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			MaxIdleConns:          16,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       60 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+	configReportClient = &http.Client{
+		Timeout: 10 * time.Second, // 配置上报可以稍长一些
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			MaxIdleConns:          8,
+			MaxIdleConnsPerHost:   2,
+			IdleConnTimeout:       60 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+)
+
 // TrafficReportItem 流量报告项（压缩格式）
 type TrafficReportItem struct {
 	N string `json:"n"` // 服务名（name缩写）
@@ -81,9 +110,7 @@ func sendBatchTrafficReport(ctx context.Context, reportItems []TrafficReportItem
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "GOST-Traffic-Reporter/1.0")
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := trafficReportClient
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -158,9 +185,7 @@ func sendConfigReport(ctx context.Context) (bool, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Config-Reporter/1.0")
 
-	client := &http.Client{
-		Timeout: 10 * time.Second, // 配置上报可以稍长一些
-	}
+	client := configReportClient
 
 	resp, err := client.Do(req)
 	if err != nil {

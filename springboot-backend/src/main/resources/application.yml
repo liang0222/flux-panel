@@ -2,11 +2,21 @@ spring:
   datasource:
     driver-class-name: org.sqlite.JDBC
     url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}
+    # 说明：原配置写的是 max-pool-size，HikariConfig 只有 setMaximumPoolSize，
+    # 该键无法绑定，Spring Boot 会静默忽略，实际一直走 Hikari 默认值 10。
+    # 生产实测确认：容器启动日志出现
+    #   "idleTimeout is close to or more than maxLifetime, disabling it"
+    # 正是 idle-timeout(600000) >= max-lifetime(500000) 的既有告警，
+    # 说明生效的是 max-lifetime=500000，即下列取值与镜像内行为一致。
+    # 本次只把键名改成正确的 maximum-pool-size，取值保持 10（= 当前真实生效值），
+    # 因此「配置生效」与「运行行为」完全一致，不收紧也不放宽连接数。
     hikari:
+      # 500000ms(≈8分20秒) 回收一次连接：用于在数据库文件被替换后重新打开，
+      # 这是既有设计，保持不变。
       max-lifetime: 500000
       connection-timeout: 30000
       idle-timeout: 600000
-      max-pool-size: 20
+      maximum-pool-size: 10
       minimum-idle: 5
       pool-name: HikariCP
       auto-commit: true
@@ -26,7 +36,12 @@ server:
   port: 6365
   tomcat:
     uri-encoding: UTF-8
-    max-thread: 800
+    # 原配置写的是 max-thread，Spring Boot 的 Tomcat 线程数键名是
+    # server.tomcat.threads.max（嵌套结构），该键同样无法绑定，
+    # 实际一直走 Tomcat 默认值 200。此处改成正确键名并显式写 200，
+    # 使「配置生效」与「当前真实行为」完全一致，不放宽也不收紧线程规模。
+    threads:
+      max: 200
     max-connections: 2000
   shutdown: graceful
   error:

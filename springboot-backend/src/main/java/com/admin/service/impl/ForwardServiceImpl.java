@@ -68,16 +68,56 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
             forwardList = baseMapper.selectAllForwardsWithTunnel();
         }
 
+        // 批量预加载关联数据：原来在循环内逐个 getById/list，N 条转发会产生
+        // N(隧道) + N(端口列表) + N*P(节点) 次 SQL；改为 3 次批量查询后在内存中
+        // 组装，查询结果、字段取值和最终返回结构完全不变。
+        Map<Long, Tunnel> tunnelMap = new HashMap<>();
+        Map<Long, List<ForwardPort>> portsByForward = new HashMap<>();
+        Map<Long, Node> nodeMap = new HashMap<>();
+
+        Set<Long> tunnelIds = forwardList.stream()
+                .map(ForwardWithTunnelDto::getTunnelId)
+                .filter(Objects::nonNull)
+                .map(Integer::longValue)
+                .collect(Collectors.toSet());
+        if (!tunnelIds.isEmpty()) {
+            for (Tunnel t : tunnelService.listByIds(tunnelIds)) {
+                tunnelMap.put(t.getId(), t);
+            }
+        }
+
+        Set<Long> forwardIds = forwardList.stream()
+                .map(ForwardWithTunnelDto::getId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (!forwardIds.isEmpty()) {
+            List<ForwardPort> allPorts = forwardPortService.list(
+                    new QueryWrapper<ForwardPort>().in("forward_id", forwardIds)
+            );
+            for (ForwardPort fp : allPorts) {
+                portsByForward.computeIfAbsent(fp.getForwardId(), k -> new ArrayList<>()).add(fp);
+            }
+            Set<Long> nodeIds = allPorts.stream()
+                    .map(ForwardPort::getNodeId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+            if (!nodeIds.isEmpty()) {
+                for (Node n : nodeService.listByIds(nodeIds)) {
+                    nodeMap.put(n.getId(), n);
+                }
+            }
+        }
+
         // 填充入口IP和端口信息
         for (ForwardWithTunnelDto forward : forwardList) {
             // 获取隧道信息
-            Tunnel tunnel = tunnelService.getById(forward.getTunnelId());
+            Tunnel tunnel = forward.getTunnelId() == null
+                    ? null
+                    : tunnelMap.get(forward.getTunnelId().longValue());
             if (tunnel == null) continue;
 
             // 获取该转发的所有ForwardPort记录
-            List<ForwardPort> forwardPorts = forwardPortService.list(
-                    new QueryWrapper<ForwardPort>().eq("forward_id", forward.getId())
-            );
+            List<ForwardPort> forwardPorts = portsByForward.getOrDefault(forward.getId(), Collections.emptyList());
 
             if (forwardPorts.isEmpty()) continue;
 
@@ -123,7 +163,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
             } else {
                 // 使用节点的serverIp（一对一，不求笛卡尔积）
                 for (ForwardPort forwardPort : forwardPorts) {
-                    Node node = nodeService.getById(forwardPort.getNodeId());
+                    Node node = nodeMap.get(forwardPort.getNodeId());
                     if (node != null && node.getServerIp() != null && forwardPort.getPort() != null) {
                         ipPortSet.add(node.getServerIp() + ":" + forwardPort.getPort());
                     }

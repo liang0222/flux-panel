@@ -7,7 +7,7 @@ services:
       DB_PATH: /app/data/gost.db
       JWT_SECRET: ${JWT_SECRET}
       LOG_DIR: /app/logs
-      JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
+      JAVA_OPTS: "-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
     ports:
       # 双栈：显式绑定 IPv4 与 IPv6（只写 [::] 会变成纯 IPv6，只写端口默认只有 IPv4）
       - "0.0.0.0:${BACKEND_PORT}:6365"
@@ -19,6 +19,17 @@ services:
       - gost-network
     stop_grace_period: 30s
     stop_signal: SIGTERM
+    # 日志轮转：原配置使用默认 json-file 驱动且不限制大小（LogConfig.Config 为空），
+    # 容器日志会随运行时间无限增长。生产实测 springboot-backend 的 json 日志已达 55MB
+    # 且没有任何上限。10MB x 3 = 单容器最多 30MB，保留最近 3 份用于故障追踪。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # 可选内存上限（默认注释，避免硬限制掩盖问题或触发 OOMKilled）：
+    # 需同时保证 -Xmx512m + Metaspace 后仍有余量，建议不小于 900m。
+    # mem_limit: 900m
     healthcheck:
       test: ["CMD", "sh", "-c", "wget --no-verbose --tries=1 --spider http://localhost:6365/flow/test || exit 1"]
       interval: 30s
@@ -38,6 +49,11 @@ services:
         condition: service_healthy
     networks:
       - gost-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 
 volumes:
