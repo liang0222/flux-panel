@@ -2,7 +2,9 @@
 
 
 
-<configuration scan="true" scanPeriod="60 seconds" debug="false">
+<!-- scan=false：容器内配置由镜像固化，不需要每 60 秒轮询/重建配置，
+     避免 logback 周期性做无意义的配置检查与重入。 -->
+<configuration scan="false" debug="false">
     <contextName>logback</contextName>
     <springProperty scope="context" name="logDir" source="log-dir" defaultValue="logs" />
     <property name="FILE_PATH" value="${logDir}/%d{yyyy-MM-dd}.log" />
@@ -16,8 +18,10 @@
     </appender>
 
     <!--按天生成日志,即一天只生成一个文件夹和一个日志文件-->
+    <!-- 去掉 Prudent：Prudent 模式会强制每次写日志都 open/write/close 文件，
+         属于同步 IO 且无法利用缓冲，在高频日志下会显著拉高 CPU 与磁盘写入次数。
+         本项目只有一个 JVM 进程写该目录，不存在多进程写同一文件的场景。 -->
     <appender name="logFile" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <Prudent>true</Prudent>
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
             <FileNamePattern>${FILE_PATH}</FileNamePattern>
             <maxHistory>7</maxHistory>
