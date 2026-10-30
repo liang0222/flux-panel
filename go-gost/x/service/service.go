@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -63,11 +62,22 @@ func SetProtocolBlock(httpOn int, tlsOn int, socksOn int) {
 type Option func(opts *options)
 
 func init() {
-	_, err := LoadConfig("config.json")
-	fmt.Println("config.json loaded")
-	if err != nil {
-		log.Fatal(err)
+	// 本 init 只做一件事：在包加载时尝试读取工作目录下的 config.json，
+	// 用来初始化 isTls / isSocks / isHttp 三个协议包装开关。
+	//
+	// 原实现在读取失败时调用 log.Fatal，等价于 os.Exit(1)。这会让任何导入本包
+	// 且在"当前工作目录没有 config.json"的环境下运行的程序直接退出 —— 不仅包括
+	// 所有单元测试，也包括任何把本包当库引用的场景（本包此前因此完全无法被测试）。
+	//
+	// 真正的配置加载与校验在 main() 中完成，那里失败同样会报错并退出，所以这里
+	// 没有理由让进程终止：读不到就保留默认值 0（不包装协议），把决定权交回调用方。
+	//
+	// 生产环境的 systemd WorkingDirectory=/etc/flux_agent 下始终存在 config.json，
+	// 成功路径的行为（打印标记 + 设置 needWrap）与原实现完全一致。
+	if _, err := LoadConfig("config.json"); err != nil {
+		return
 	}
+	fmt.Println("config.json loaded")
 	needWrap = isTls+isSocks+isHttp > 0
 }
 

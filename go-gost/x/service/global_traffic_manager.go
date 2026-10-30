@@ -95,8 +95,10 @@ func (m *GlobalTrafficManager) collectAndReport() {
 		return
 	}
 
-	// 复制当前所有流量数据（避免长时间持锁）
-	trafficSnapshot := make(map[string]*ServiceTraffic)
+	// 复制当前所有流量数值（避免长时间持锁）
+	// 说明：原实现额外维护了一份 trafficSnapshot（map[string]*ServiceTraffic），
+	// 该变量在函数内从未被读取，属于每次采集（每 5 秒）产生的无用分配，
+	// 并会在上报期间一直持有 ServiceTraffic 指针。此处只保留数值快照。
 	reportData := make(map[string]struct {
 		up   int64
 		down int64
@@ -105,7 +107,6 @@ func (m *GlobalTrafficManager) collectAndReport() {
 	for name, traffic := range m.serviceTraffic {
 		traffic.mu.Lock()
 		if traffic.UpBytes > 0 || traffic.DownBytes > 0 {
-			trafficSnapshot[name] = traffic
 			reportData[name] = struct {
 				up   int64
 				down int64

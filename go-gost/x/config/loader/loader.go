@@ -1,6 +1,9 @@
 package loader
 
 import (
+	"os"
+	"strings"
+
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/x/config"
 	"github.com/go-gost/x/config/parsing"
@@ -36,6 +39,18 @@ func (l *loader) Load(cfg *config.Config) error {
 	logCfg := cfg.Log
 	if logCfg == nil {
 		logCfg = &config.LogConfig{}
+	}
+	// 日志级别默认值：面板托管的节点长期运行，gost 默认的 info 级别会为每条
+	// 转发连接打印两行日志（>-> / <-<），单节点可达每分钟数百行，导致 journald
+	// 与磁盘持续膨胀。这里在配置文件未显式指定 level 时改为 warn。
+	// 需要还原为 gost 原始行为：设置环境变量 GOST_LOG_LEVEL=info，或在
+	// gost.json 中写入 "log": {"level": "info"}。
+	if strings.TrimSpace(logCfg.Level) == "" {
+		if lv := strings.TrimSpace(os.Getenv("GOST_LOG_LEVEL")); lv != "" {
+			logCfg.Level = lv
+		} else {
+			logCfg.Level = "warn"
+		}
 	}
 	logger.SetDefault(logger_parser.ParseLogger(&config.LoggerConfig{Log: logCfg}))
 
