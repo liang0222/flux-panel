@@ -184,10 +184,15 @@ func applyMemoryLimit() {
 	}
 
 	raw := os.Getenv("FLUX_AGENT_MEMLIMIT")
+	source := "环境变量 FLUX_AGENT_MEMLIMIT"
 	if raw == "" {
 		raw = "1200MiB"
+		source = "内置默认值"
 	}
-	if raw == "off" || raw == "0" {
+	// 关闭开关：大小写不敏感地接受 off/disable/0，避免误配置落到解析失败分支。
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "off", "disable", "disabled", "0":
+		fmt.Printf("ℹ️  Go 内存软上限已关闭（%s=%s），使用 Go 默认 GC 策略\n", source, raw)
 		return
 	}
 
@@ -199,7 +204,7 @@ func applyMemoryLimit() {
 	}
 
 	runtimedebug.SetMemoryLimit(limit)
-	fmt.Printf("✅ Go 内存软上限已设置: %d MiB (来源: %s)\n", limit/(1024*1024), raw)
+	fmt.Printf("✅ Go 内存软上限已设置: %d MiB（来源: %s，原始值: %s）\n", limit/(1024*1024), source, raw)
 }
 
 // parseMemoryLimit 解析形如 "1200MiB"、"1GiB"、"1536MB"、"536870912" 的内存大小。
