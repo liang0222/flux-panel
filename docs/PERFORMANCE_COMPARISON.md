@@ -331,6 +331,7 @@ CREATE INDEX IF NOT EXISTS idx_forward_port_node ON forward_port (node_id);
 | **前端页面人工回归** | ❌ **未测试** | 仅验证 HTTP 200，未逐页点击 |
 | **移动端兼容性** | ❌ **未测试** | 无设备 |
 | `ForwardServiceImpl` 批量查询的**性能**收益 | ✅ **已验证：可忽略** | 已部署；生产实测 319 次→4 次，但耗时均为 0.000s（无索引 + 106 行规模小） |
+| `getAllForwards` **业务正确性**（鉴权后真实调用） | ✅ **已验证** | 用生产 `JWT_SECRET` 签发只读 token 调用 `POST /api/v1/forward/list`，返回 `code=0`、**106 行**；`inIp`/`inPort`/`tunnelName`/`remoteAddr`/`status`/`userName`/`strategy` 全部非空 106/106；入口 IP 均为 `87.83.207.7`，与 `tunnel.in_ip` 一致；每条 1 组 ip:port，与 `forward_port` 106 个互异端口一致；接口耗时 15~24 ms |
 | ~~relay 连接滞留是否修复~~ | ✅ **不存在该问题** | 已证伪：pprof 显示连接:goroutine = 81:81，1:1 对应 |
 | Docker 日志轮转是否生效 | ✅ **已生效** | 容器已重建，`LogConfig` 现为 10m×3 |
 

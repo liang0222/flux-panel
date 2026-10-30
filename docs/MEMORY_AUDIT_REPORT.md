@@ -623,6 +623,9 @@ docker exec springboot-backend sh -c "command -v jcmd jstat jmap java"
 | **pprof 堆差分** | `go tool pprof -base` 对比 t0/t1 | ✅ 定位到 64 KiB 缓冲区池占增长 81.68% |
 | **cgroup 内存分解** | `memory.stat` | ✅ anon_thp 占 anon 88% |
 | **优化后实测** | 重启后连续采样 | ✅ agent 100 MiB / Java 432 MiB |
+| **鉴权后真实业务调用** | 用生产 `JWT_SECRET` 签发只读 token 调 `POST /api/v1/forward/list` | ✅ `code=0`、106 行、字段 106/106 非空、耗时 15~24 ms |
+| **部署新镜像** | `docker compose up -d --force-recreate backend` | ✅ healthy、restarts=0、Java 319.9 MiB |
+| **生产日志轮转生效** | `docker inspect .HostConfig.LogConfig` | ✅ backend 与 frontend 均为 10m×3 |
 
 > **两项此前的"❌ 无法诊断"已被推翻**：
 > - 「容器内无 jcmd」→ 用 `docker run --rm --pid=container:springboot-backend --network=container:springboot-backend eclipse-temurin:21-jdk` 挂载即可，**无需重启容器、无需改镜像**。
