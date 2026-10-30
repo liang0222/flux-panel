@@ -987,3 +987,88 @@ m.clearReportedTraffic(reportData)                                  // 仅成功
 | 前端容器 | 2.7 MiB |
 | 最近 10 分钟上报失败 | 0 |
 | SQLITE_BUSY（24h） | 2 次，集中在启动后 30 分钟 |
+
+---
+
+## 13. 第四轮：两处已部署的修复与实测效果
+
+本节记录 §12.3 与 §12.4 发现的问题在**生产机上实际修复并验证**的结果。
+所有数字均为生产机 87.83.207.7 实测，非推算。
+
+### 13.1 SQLite busy_timeout：已修复（缓解性质）
+
+**改动**（`springboot-backend/src/main/resources/application.yml`）：
+```yaml
+url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}?busy_timeout=5000
+```
+
+**为什么改这里**：`SQLiteConfig` 里的 `PRAGMA busy_timeout=5000` 是**连接级**设置，
+只对它取到的那一条连接生效。写在 URL 上由驱动对每条新建连接应用。
+
+**驱动默认值实测**（sqlite-jdbc 3.45.0.0，同版本 jar 直接运行）：
+```
+带 busy_timeout 参数 -> PRAGMA busy_timeout = 5000
+不带参数           -> PRAGMA busy_timeout = 3000
+```
+默认是 3000ms 而非 0，说明原来的故障是「等 3 秒仍拿不到写锁」。
+改成 5000ms 是把窗口放宽，**根因（长写锁来源）仍未定位**，属缓解。
+
+**部署后状态**：容器重建后 `SQLITE_BUSY` 计数为 **0**。
+但观察窗口只有数分钟，24 小时内原本也只有 2 次，**不足以证明已解决**，标注为**未验证**。
+
+### 13.2 超长请求参数日志：已修复（实测有效）
+
+**问题**：`/flow/upload` 每 5 秒被节点调用一次，`LogAspect` 把**完整的 AES 密文**
+写进日志。密文对排查无价值，却在持续写盘。
+
+**生产实测（改前）**：
+```
+容器 json 日志增长: 336,859 字节/分钟
+推算:               19 MB/小时, 462 MB/天
+```
+
+**改动**（`springboot-backend/src/main/java/com/admin/common/aop/LogAspect.java`）：
+新增 `MAX_PARAM_LOG_LEN = 1000` 与 `truncateForLog()`，
+在两处 `getRequestParams(joinPoint)` 调用后套用。
+短参数原样输出（正常业务日志不受影响），超长载荷保留前 1000 字符与原长度。
+
+**生产实测（改后）**：
+```
+容器 json 日志增长:  12,712 字节/分钟
+推算:                744 KB/小时, 17 MB/天
+降幅:                96.2%
+```
+
+这是**已实测确认**的改善：磁盘写入量减少约 96%，且不影响任何排查能力
+（密文本就无法定位问题，保留长度与前缀足以判断请求是否到达、载荷多大）。
+
+### 13.3 两处修复的验证记录
+
+| 项目 | 结果 |
+|---|---|
+| `mvn test` 全量 | **91 个用例，0 失败 0 错误，BUILD SUCCESS** |
+| 镜像构建 | `ahmadplayz721/flux-panel-backend:2.0.7-beta`，已推送 Docker Hub，digest `sha256:0a4d617a…83c0` |
+| 容器状态 | `Up (healthy)`，`NRestarts=0` |
+| 流量上报 | 容器启动后成功 34 次，失败 **0** 次 |
+| SQLITE_BUSY | 重启后 0 次 |
+| 前端 | IPv4/IPv6 均 200 |
+| 后端 | `/flow/test` 200（`/` 返回 404 是既有行为，无根路由） |
+| 数据库 | `sqlite_data` 卷完好，数据未动 |
+
+### 13.4 重启窗口内的失败是预期行为
+
+部署过程中 agent 出现 9 次 `❌ 全局流量上报失败: ... connection refused`，
+时间集中在 15:49:46–15:49:52 与 15:55:30–15:55:37，即两次容器重建窗口。
+容器启动完成后失败数为 **0**，且 §12.4 已证明失败时不清空累计流量、下一轮自动重试，
+**无数据丢失**。
+
+### 13.5 当前生产整体状态（15:58）
+
+| 指标 | 数值 |
+|---|---|
+| 宿主 used / available | 1,420 MB / 6,519 MB |
+| PSI memory some (avg10/60/300) | 0.00 / 0.00 / 0.00 |
+| springboot-backend | 324.8 MiB（docker stats） |
+| vite-frontend | 2.7 MiB |
+| agent MemoryCurrent | 322,293,760 B（≈307 MB），NRestarts=0 |
+| openspeedtest（非本项目） | 14.85 MiB |

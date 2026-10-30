@@ -758,3 +758,17 @@ git commit -m "revert: 回滚内存优化改动"
 
 **注意**：`docker tag` 覆盖本地 tag 不影响 Docker Hub 上已推送的镜像，
 Hub 上仍是新版本。若要连 Hub 一起回退，需重新 push 旧镜像。
+
+---
+
+## 17. 第四轮修复（已部署并实测）
+
+| 文件 | 改动 | 验证 |
+|---|---|---|
+| `springboot-backend/src/main/resources/application.yml` | JDBC URL 追加 `?busy_timeout=5000` | 容器重建后 `SQLITE_BUSY` = 0（观察窗口短，标未验证） |
+| `springboot-backend/src/main/java/com/admin/common/aop/LogAspect.java` | 新增 `MAX_PARAM_LOG_LEN=1000` 与 `truncateForLog()`，两处调用套用 | 日志增长 336,859 → 12,712 字节/分钟，**-96.2%** |
+
+提交：`29205d9 fix(java): 修复 busy_timeout 只作用于一条连接，并截断超长请求参数日志`
+
+测试：`mvn test` 91 个用例全部通过（0 失败 0 错误）。
+镜像：`ahmadplayz721/flux-panel-backend:2.0.7-beta`，digest `sha256:0a4d617a30bede60af56339bc916037d1ec9c5e8c38583d2deebf2c2b68183c0`。
