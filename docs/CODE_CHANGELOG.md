@@ -644,7 +644,7 @@ Environment="GOMEMLIMIT=512MiB"
 
 生效方式：`systemctl daemon-reload && systemctl restart flux_agent`。
 
-> **变更历史**：12:01:46 首次以 `1200MiB` 重启；2026-10-31 14:42:22 **收紧为 512MiB** 后再次重启（备份 `/root/backup_20261031_memlimit/override.conf.orig`，md5 校验一致）。三小时实测：VmRSS 288~313 → 214~274 MB、AnonHugePages 256 → 108~188 MB、NumGC ≈38 次/小时（改前 33）、报错 0、转发正常。**收益不稳定且小于早前估计的 200 MB**，机制见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §7.2。
+> **变更历史**：12:01:46 首次以 `1200MiB` 重启；2026-10-31 14:42:22 **收紧为 512MiB** 后再次重启（备份 `/root/backup_20261031_memlimit/override.conf.orig`，md5 校验一致）。3 小时 13 分实测：**VmHWM 310,224 → 286,712 kB（−23.5 MB）**；VmRSS 214~280 MB 振荡、AnonHugePages 108~258 MB 振荡（THP 相位驱动）；NumGC 33 → 38 次/小时；报错 0；监听 110 端口、转发正常。**稳态 RSS 无可归因收益，不可宣称下降。** 机制见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §7.2。
 
 > **注意**：当前生产运行的 agent 二进制是**旧版本**（未包含第 12 节的 `applyMemoryLimit` 代码），因此这个 `Environment` 是 Go runtime **原生识别**的 `GOMEMLIMIT` 变量，直接生效，不依赖新代码。这也意味着**部署新二进制后，环境变量优先级高于代码默认值，行为一致**。
 

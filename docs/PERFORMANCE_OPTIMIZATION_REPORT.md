@@ -448,7 +448,7 @@ Environment="GOMEMLIMIT=512MiB"
 
 > 生产当前跑的是旧二进制（8,327,088 字节 UPX 上游版），但 `GOMEMLIMIT` 是 **Go runtime 原生识别**的环境变量，**不依赖新代码**，因此立即生效（已用 `GODEBUG=gctrace=1` 实证）。
 >
-> **2026-10-31 14:42 由 1200MiB 收紧到 512MiB**，三小时实测 VmRSS 288~313 → 214~274 MB、AnonHugePages 256 → 108~188 MB、NumGC 33 → 38 次/小时、报错 0 条。收益**不稳定且小于早前估计的 200 MB**，真实机制见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §7.2。
+> **2026-10-31 14:42 由 1200MiB 收紧到 512MiB**，3 小时 13 分实测：**VmHWM 310,224 → 286,712 kB（−23.5 MB，唯一站得住的收益）**；VmRSS 在 214~280 MB 间振荡（17:45 测 237 MB、17:55 测 280 MB），AnonHugePages 在 108~258 MB 间振荡 —— 说明稳态 RSS 由 **THP 相位**驱动，不由 `GOMEMLIMIT` 驱动。NumGC 33 → 38 次/小时（+15%），报错 0 条。**不可宣称稳态内存下降。** 机制见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §7.2。
 
 ### 12.4 为什么最初是 1200 MiB，以及后来为何收紧到 512 MiB
 

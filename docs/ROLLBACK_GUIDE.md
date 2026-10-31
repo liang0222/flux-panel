@@ -109,9 +109,9 @@ systemctl daemon-reload && systemctl restart flux_agent
 systemctl show flux_agent -p Environment    # 期望: GOMEMLIMIT=1200MiB
 ```
 
-> **实测参考**：512MiB 相对 1200MiB，VmRSS 288~313 → 214~274 MB，
-> AnonHugePages 256 → 108~188 MB，NumGC 33 → 38 次/小时，报错 0 条。
-> 收益不稳定且小于 200 MB；是否值得保留由你判断，回滚成本极低。
+> **实测参考**：512MiB 相对 1200MiB，**VmHWM 310,224 → 286,712 kB（−23.5 MB，唯一稳定收益）**；
+> VmRSS 214~280 MB 振荡、AnonHugePages 108~258 MB 振荡（THP 相位驱动）；
+> NumGC 33 → 38 次/小时；报错 0 条。**稳态 RSS 无可归因下降**，是否保留由你判断，回滚成本极低。
 
 ### 2.4 停止趋势采样器（若不需要继续观测）
 
