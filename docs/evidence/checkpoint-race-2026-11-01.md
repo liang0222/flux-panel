@@ -31,3 +31,16 @@
    不牺牲 checkpoint 效果。
 5. 生产每 300 秒一次 checkpoint，只有恰好撞上长读快照时才卡住 —— 这解释了
    为什么 24 小时只有 58 次上报失败而不是每 5 分钟一次。
+
+## 复现脚本
+
+见 `docs/evidence/ckrace.py`。要点：
+
+- `prepare()` 用 `sqlite3.Connection.backup()` 复制生产库（不能直接拷文件，
+  否则 WAL 未合并会缺表），并保留一个常驻连接维持 WAL 积压
+  （SQLite 在最后一个连接关闭时会自动 checkpoint 并删掉 WAL，
+  不维持连接会得到 `log=-1 done=-1` 的假结果）。
+- `open_prod_conn()` 必须用 `sqlite3.connect("file:" + path + "?busy_timeout=5000", uri=True)`：
+  python 的 `sqlite3.connect` 不带 `uri=True` 时不解析 `?参数`，
+  会把整段参数当文件名，静默打开空库 —— 与 sqlite-jdbc 的未知参数陷阱同源，
+  第一版实验就是被这一点坑到、得出「3 次全失败、max=0ms」的假结果。

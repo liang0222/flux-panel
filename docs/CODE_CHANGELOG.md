@@ -774,3 +774,46 @@ Hub 上仍是新版本。若要连 Hub 一起回退，需重新 push 旧镜像�
 
 测试：`mvn test` 91 个用例全部通过（0 失败 0 错误）。
 镜像：`ahmadplayz721/flux-panel-backend:2.0.7-beta`，digest `sha256:0a4d617a30bede60af56339bc916037d1ec9c5e8c38583d2deebf2c2b68183c0`。
+
+---
+
+## 18. 第五轮修复（2026-11-01，已部署）
+
+### 18.1 `springboot-backend/src/main/java/com/admin/config/SQLiteConfig.java`
+
+| 项 | 内容 |
+|---|---|
+| 位置 | `performCheckpoint()`，原第 59 行 |
+| 修改前 | `statement.execute("PRAGMA wal_checkpoint(TRUNCATE);");` |
+| 修改后 | `statement.execute("PRAGMA wal_checkpoint(PASSIVE);");` |
+| 原因 | TRUNCATE 在有活跃读快照 + WAL 积压时无法完成，按 busy_timeout 反复重试并占据写锁；生产卷实测卡 10022ms，同期上报写入 5019~5022ms 后失败 `database is locked`，与 agent 侧 5 秒 HTTP 超时吻合 |
+| 兼容性 | 两者都把已提交页回写主库，差别只在「是否尝试收缩 WAL 文件」；实测 PASSIVE 同场景 12ms，`log=674 done=674` 积压照常回写 |
+| 未改动 | `onShutdown()` 第 90 行仍保留 `wal_checkpoint(TRUNCATE)`（应用已在退出，无并发写者，且需要把 WAL 收干净） |
+
+### 18.2 `springboot-backend/src/main/resources/application.yml`
+
+| 项 | 内容 |
+|---|---|
+| 修改前 | `url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}?busy_timeout=5000` |
+| 修改后 | `url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}?journal_mode=WAL&synchronous=NORMAL&busy_timeout=5000&cache_size=-8000&temp_store=MEMORY` |
+| 原因 | `SQLiteConfig.run()` 只对池中一条连接设置 PRAGMA，其余连接是驱动默认值（实测 `synchronous=2/FULL`、`cache_size=-2000`、`busy_timeout=3000`）；URL 参数由驱动对每条新连接执行，已用 5 条独立连接逐一验证 |
+| 红线 | **禁止**在 URL 加入驱动不识别的参数（如 `wal_autocheckpoint`）：实测会停止解析并把 `?xxx` 拼进文件名，静默打开空库 |
+| 行尾 | 统一为 CRLF（原文件 77 CRLF + 84 LF 混用） |
+
+### 18.3 `springboot-backend/src/test/java/com/admin/config/SqliteDatasourceUrlTest.java`（新增）
+
+4 个用例，作为红线护栏：
+
+1. `urlContainsOnlyKnownParams()` —— URL 参数白名单，出现未知参数即失败；
+2. `urlPinsWalAndNormalSynchronous()` —— 断言必含 `journal_mode=WAL`、`synchronous=NORMAL`、`busy_timeout=5000`；
+3. `unknownParamReallyOpensEmptyDatabase()` —— 实证未知参数会打开空库并生成怪文件名，同时断言原库完好；
+4. `periodicCheckpointMustNotUseBlockingMode()` —— 只读源码中 `performCheckpoint()` 方法体，断言不含 `TRUNCATE/RESTART/FULL` 且含 `PASSIVE`（不扫全类，因为 `onShutdown()` 有意保留 TRUNCATE）。
+
+### 18.4 `springboot-backend/src/test/java/com/admin/common/utils/JwtUtilTest.java`
+
+| 项 | 内容 |
+|---|---|
+| 位置 | `cachedTokenStillExpires()` |
+| 修改前 | `exp = now/1000 + 1`，只做两次 `assertTrue` |
+| 修改后 | `exp = now/1000 + 3`，两次 `assertTrue` 后等待真正过期，再断言 `assertFalse` |
+| 原因 | 原用例写死 1 秒且不验证过期后行为，线程跨秒边界即间歇失败（实测 5 次中失败 2 次），与本类要验证的缓存行为无关；改后连续 3 次全通过，且补上了「缓存命中也不能放过过期 token」这一真正要断言的语义 |

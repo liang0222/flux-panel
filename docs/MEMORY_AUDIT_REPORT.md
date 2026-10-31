@@ -666,12 +666,28 @@ docker exec springboot-backend sh -c "command -v jcmd jstat jmap java"
 | 变更 | 位置 | 备份 | 效果（实测） |
 |---|---|---|---|
 | `-Xms256m` → `-Xms64m` + `MaxMetaspaceSize=192m` | `/root/docker-compose.yml` | `backup_20261030_120012/docker-compose.yml.orig` | Java RSS 661,436 → 432,120 kB |
-| `GOMEMLIMIT=1200MiB` → **512MiB** | `/etc/systemd/system/flux_agent.service.d/override.conf` | 目录原不存在，删除即还原 | agent MemoryCurrent 2.76 GB → 116 MB（重启贡献为主）；收紧到 512MiB 后 VmRSS 288~313 → 214~274 MB、AnonHugePages 256 → 108~188 MB |
+| `GOMEMLIMIT=1200MiB` → **512MiB** | `/etc/systemd/system/flux_agent.service.d/override.conf` | 目录原不存在，删除即还原 | agent MemoryCurrent 2.76 GB → 116 MB（**重启贡献为主，非优化收益**）；收紧到 512MiB 后 VmRSS 在 199~282 MB 之间振荡、AnonHugePages 92~252 MB 之间振荡（**稳态由 THP 相位决定，不可宣称下降**），唯一站得住的收益是 VmHWM 310,224 → 286,712 kB |
 | 开启 pprof（仅回环） | `/etc/flux_agent/gost.json` | `backup_20261030_120012/gost.json.orig` | 拿到首个真实堆画像 |
 
-**未执行的变更**：relay 连接回收修复（根因未定位）、Docker 日志轮转（需容器重建）、任何数据库/API/认证改动。
+**未执行的变更**：relay 连接回收修复（根因未定位）、Go agent 二进制替换（自建版已构建并发布到
+Release `2.0.7-beta-perf`，尚未在生产替换）、前端容器日志轮转（需再次重建）、
+任何数据库结构/API 协议/认证体系的改动。
 
-**所有变更均未提交到 Git**，回滚方式见《ROLLBACK_GUIDE.md》。
+**Git 状态（2026-11-01 更新）**：前四轮代码改动已提交并推送到
+`feat/port-traffic-ranking`（合并提交 `9bcf49f` 于 `perf/memory-optimization`，后续
+`a4d2f85` 为第五轮修复）。生产机上 `/root/docker-compose.yml` 与
+`/etc/systemd/system/flux_agent.service.d/override.conf` 属于**服务器侧配置，不在 Git 仓库内**，
+回滚方式见《ROLLBACK_GUIDE.md》。
+
+### 9.1 第五轮补充（2026-11-01）
+
+| 项目 | 内容 |
+|---|---|
+| 定位到的新根因 | `wal_checkpoint(TRUNCATE)` 与流量上报争用写锁（详见《MEMORY_ROOT_CAUSE_ANALYSIS.md》§14） |
+| 生产卷实测 | TRUNCATE 卡 10022ms、同期上报 5019~5022ms 后失败；PASSIVE 同场景 12ms |
+| 已上线 | 镜像 `sha256:c42978b6…`，`Up (healthy)`、`Restarts=0`、数据 109/4/1 完好 |
+| 新增护栏 | `SqliteDatasourceUrlTest`（4 例）拦截「URL 加未知参数导致静默空库」 |
+| 尚未验证 | 24 小时尺度失败数归零、`synchronous=NORMAL` 掉电窗口、`cache_size=-8000` 的 RSS 影响 |
 
 ---
 

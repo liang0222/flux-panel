@@ -401,3 +401,88 @@ cat /sys/fs/cgroup/system.slice/flux_agent.service/memory.events
 - RSS 与连接数的相关性：3 小时数据实测 Pearson **r = 0.920**，
   但 15 小时数据显示连接数下降 68% 时 RSS 反升 17% ——
   **RSS 主要由 THP 相位与 Go arena 保留决定，不能单看连接数**。
+
+
+---
+
+## 10. SQLite 争用专项监控（2026-11-01 新增）
+
+上报超时的根因是 SQLite checkpoint 与上报写争用同一把写锁。日常巡检只需要盯三个量。
+
+### 10.1 上报失败数（最直接的业务指标）
+
+```bash
+# 近 24 小时的失败条数（正常应为 0，重启窗口内允许 1~3 条 connection refused）
+journalctl -u flux_agent --since "24 hours ago" | grep -c "❌ 全局流量上报失败"
+
+# 看具体原因
+journalctl -u flux_agent --since "24 hours ago" | grep "❌ 全局流量上报失败" \
+  | sed -E 's/.*(context deadline exceeded|connection refused|SQLITE_BUSY|服务器响应).*/\1/' \
+  | sort | uniq -c
+```
+
+判读：
+
+| 现象 | 含义 |
+|---|---|
+| `context deadline exceeded` 成簇出现 | 大概率是 checkpoint 或长事务持写锁（本轮已改为 PASSIVE，若复现需查是否有新的持锁源） |
+| `connection refused` 只出现在容器重建前后几秒 | 正常，不是问题 |
+| `服务器响应: {"code":-2,...SQLITE_BUSY...}` | 服务端拿到请求但写库失败，需看后端日志 |
+
+### 10.2 后端 SQLITE_BUSY 计数
+
+```bash
+# 注意：容器时区是 UTC，--since 不带 Z 会按宿主 CST 解析，必须写 Z
+docker logs --since 24h springboot-backend 2>&1 | grep -c 'Error updating database'
+```
+
+> 计数要点：`grep -c SQLITE_BUSY` 会把同一异常的堆栈多行都算进去（实测 63 行 = 27 次
+> 真实异常）。**用 `Error updating database` 才是异常次数**。
+
+### 10.3 WAL 文件大小（判断 checkpoint 是否正常工作）
+
+```bash
+docker exec springboot-backend ls -l /app/data/
+```
+
+| WAL 大小 | 判读 |
+|---|---|
+| 几十 KB ~ 几百 KB | 正常 |
+| 接近 4 MB | `wal_autocheckpoint=1000` 页阈值附近，会自动回写 |
+| 持续 > 10 MB 且不回落 | checkpoint 失效，需查是否有长读快照一直不释放 |
+
+手动触发一次观测（不影响生产）：
+
+```bash
+docker exec springboot-backend sqlite3 /app/data/gost.db "PRAGMA wal_checkpoint(PASSIVE);"
+# 返回 busy=0 log=N done=N，且 WAL 大小下降到接近 0 即为正常
+```
+
+### 10.4 连接级 PRAGMA 是否按预期生效
+
+`sqlite3` CLI 看到的是**它自己新开连接**的默认值，不是应用连接池里的值，
+不能用来判断应用配置。正确做法是核对镜像里的 `application.yml`：
+
+```bash
+cid=$(docker create ahmadplayz721/flux-panel-backend:2.0.7-beta)
+docker cp "$cid":/app/app.jar /tmp/v.jar && docker rm "$cid"
+python3 -c '
+import zipfile
+y = zipfile.ZipFile("/tmp/v.jar").read("BOOT-INF/classes/application.yml").decode()
+print([l.strip() for l in y.splitlines() if l.strip().startswith("url:")][0])
+'
+```
+
+期望值：
+`jdbc:sqlite:${DB_PATH:/app/data/gost.db}?journal_mode=WAL&synchronous=NORMAL&busy_timeout=5000&cache_size=-8000&temp_store=MEMORY`
+
+### 10.5 新增护栏：应用启动后 5 分钟内的自检清单
+
+| 检查项 | 命令 | 通过标准 |
+|---|---|---|
+| 容器健康 | `docker ps --filter name=springboot-backend --format '{{.Status}}'` | `Up ... (healthy)` |
+| 无重启 | `docker inspect --format '{{.RestartCount}}' springboot-backend` | `0` |
+| 数据行数 | `docker exec springboot-backend sqlite3 /app/data/gost.db "SELECT COUNT(*) FROM forward;"` | `109` |
+| 无怪文件 | `docker exec springboot-backend ls /app/data/` | 不含带 `?` 的文件名 |
+| 上报节拍 | `docker logs --since 2m springboot-backend 2>&1 \| grep -c uploadFlowData` | 约 24（每 5 秒一条） |
+| 写库无错 | `docker logs --since 5m springboot-backend 2>&1 \| grep -c 'Error updating database'` | `0` |

@@ -1126,3 +1126,101 @@ url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}?busy_timeout=5000
 | vite-frontend | 2.7 MiB |
 | agent MemoryCurrent | 322,293,760 B（≈307 MB），NRestarts=0 |
 | openspeedtest（非本项目） | 14.85 MiB |
+
+---
+
+## 14. 第五轮：上报超时的真正根因（已定位并修复，2026-11-01）
+
+### 14.1 结论先行
+
+一天中 58 次 `❌ 全局流量上报失败: context deadline exceeded`，根因是
+**SQLite 的 `PRAGMA wal_checkpoint(TRUNCATE)` 与流量上报争用同一把写锁**：
+
+`SQLiteConfig` 每 300 秒执行一次 TRUNCATE checkpoint。当它遇到「有活跃读快照 +
+WAL 有积压」时无法完成，会按 `busy_timeout` 反复重试，**期间一直占据写锁位置**。
+同一时刻到达的流量上报（109 条独立 autocommit UPDATE）只能排队等锁，等满 5 秒
+`busy_timeout` 后失败；而 agent 侧 HTTP 客户端超时也正好是 5 秒，于是上报在客户端
+看来就是 `context deadline exceeded`。
+
+### 14.2 生产卷实测复现（决定性证据）
+
+在真实生产卷 `/var/lib/docker/volumes/sqlite_data/_data` 上用生产库一致性副本
+（`forward` 109 行）、生产同款连接串 `?busy_timeout=5000` 复现：
+
+| 场景 | checkpoint 结果 | 同期上报写入 |
+|---|---|---|
+| TRUNCATE（生产现状） | 10022ms，`busy=1 log=674 done=674` | 2 次，p50 **5019ms**，max 5022ms，**1 次失败** `database is locked` |
+| PASSIVE（修复后） | **12ms**，`busy=0 log=674 done=674` | checkpoint 12ms 就结束，写入未受影响 |
+| 两者 checkpoint 结束后 | — | max 83ms / 68ms，0 失败 |
+
+要点：
+
+1. TRUNCATE 的 10022ms 是**两轮** `busy_timeout`（5000ms × 2）内部重试的合计，
+   与上报侧 5019~5022ms 的失败耗时处于同一时间窗内。
+2. 失败错误文本 `database is locked` 与生产 `[SQLITE_BUSY] The database file is
+   locked (database is locked)` 同源。
+3. PASSIVE 的 `log=674 done=674` 说明**积压照常回写**，checkpoint 功能没有打折；
+   两者差别只在「是否尝试收缩 WAL 文件」。
+4. 完整脚本与输出见 `docs/evidence/checkpoint-race-2026-11-01.md`。
+
+为什么 24 小时只有几十次而不是每 5 分钟一次：checkpoint 每 300 秒一次，只有恰好
+撞上「长读快照 + WAL 积压」这个组合时才会卡住，属低概率叠加。
+
+### 14.3 排除项（都做过实验，不成立）
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| fsync 太慢 | 生产卷 300 次 4KB 写+fsync | p50 0.51ms / p99 1.81ms，按 p99 算 109 次也只有 197ms |
+| 写路径本身太慢 | 生产卷上 109 条 UPDATE，30 轮 | 默认 p50 41ms / max 111ms；加 busy_timeout 后 p50 37ms |
+| fsync 竞争抖动 | 后台持续刷盘 + 上报并发，20 轮 | 最差 max 152ms，**超 5000ms 轮次为 0** |
+| 服务端停机/无响应 | 逐分钟统计 uploadFlowData 完成数 | 故障窗口内**严格每 5 秒一条，一条不少** |
+| 请求体膨胀自强化 | 统计 upload 行长度 | 集中在 1063~1195 字符，无膨胀 |
+| hairpin NAT 路径异常 | 公网/本地各 200 次新建连接 + 各 24 次长连接 | 全部 200 成功，p95 0.9ms，长连接 0 失败 |
+| 重复进程/重复写者 | `ps` + `docker ps -a` + volume filter | agent 仅 1 个进程，容器仅 4 个，无重复 |
+| TCP backlog / conntrack | `nstat -az`、`nf_conntrack_count` | ListenOverflows 0、insert_failed 0、drop 0 |
+| WebSocket 阻塞 | 全天 `成功发送消息到节点` 计数 | 仅 15 次，故障窗口 0 次 |
+| Tomcat 线程耗尽 | 48h 内线程号统计 | 只有 exec-1..exec-10，从未超过 10 |
+| 定时任务对齐 | 58 条失败的时刻分布 | 无固定秒相位，不是定时任务造成 |
+
+### 14.4 同时修掉的第二个缺陷：连接级 PRAGMA 只作用于一条连接
+
+`SQLiteConfig.run()` 用 `dataSource.getConnection()` 设置
+`synchronous / cache_size / temp_store / busy_timeout`，但取到的是连接池里的**一条**
+连接，归还后其余连接仍是驱动默认值。实测无参数连接的默认值为
+`journal_mode=delete synchronous=2(FULL) cache_size=-2000 busy_timeout=3000`，
+即同一应用里并存「WAL/NORMAL」和「FULL」两种提交语义。
+
+修复方式是把这些 PRAGMA 写进 JDBC URL，由驱动对每条新连接执行。
+已用 5 条独立连接逐一读取 `PRAGMA` 验证全部生效。
+
+### 14.5 一个必须记录的事故级陷阱
+
+`sqlite-jdbc` 遇到**不识别的 URL 参数名**时不会报错，而是停止解析并把「剩余的
+`?xxx` 整段」当成数据库文件名的一部分，于是**静默打开一个全新的空库**。
+
+实测：`?wal_autocheckpoint=1000` → 目录里出现 `gost.db?wal_autocheckpoint=1000`
+（4096 字节空库），随后对该连接的任何查询报 `no such table: forward`。
+原库文件仍在原地完好，但面板上所有转发/用户/统计全部「消失」。
+
+因此 URL 里只允许出现已验证被驱动识别的参数
+（`journal_mode / synchronous / busy_timeout / cache_size / temp_store`）。
+`wal_autocheckpoint` 必须继续由 `SQLiteConfig` 用 `PRAGMA` 语句设置。
+新增的 `SqliteDatasourceUrlTest` 会在这条红线被破坏时让构建失败。
+
+### 14.6 部署与验证（2026-11-01 06:05 CST）
+
+| 项目 | 结果 |
+|---|---|
+| 镜像 | `ahmadplayz721/flux-panel-backend:2.0.7-beta`，digest `sha256:c42978b690926e4221e96a726f3e77167ed115f399edf4ab4038da2b5d5dfa08` |
+| 容器启动 | `Up (healthy)`，`Restarts=0`，启动耗时 5.041s |
+| 数据完整性 | `forward` 109 行 / `node` 4 行 / `user` 1 行，与部署前一致 |
+| 前端 | IPv4 `/` 200、IPv6 `/` 200 |
+| 后端 | `/flow/test` 200 |
+| 上报节拍 | 部署后每 5 秒一条，2 分钟 12 条，无缺口 |
+| SQLITE_BUSY | 部署后 10 分钟 **0** 次 |
+| 容器内存 | 320 MiB（部署前 459 MiB，含重启后 JIT 未预热，非同一时点可比） |
+| 重启窗口失败 | 仅 06:05:42–06:05:47 的 2 条 `connection refused`（预期） |
+
+**限定**：本次只验证了「部署后短期无失败」。TRUNCATE 的触发概率本来就低
+（每 300 秒一次且需叠加读快照），因此**不能宣称 24 小时失败数已归零**，
+需继续观察至少一个完整 checkpoint 周期与真实读快照并发场景。

@@ -371,3 +371,89 @@ docker compose -f /root/docker-compose.yml start backend
 回滚后状态：
 遗留问题：
 ```
+
+
+---
+
+## 10. 回滚第五轮：SQLite checkpoint 与 JDBC URL（2026-11-01）
+
+本轮只改了后端镜像，**没有动数据库结构、没有动数据文件**，因此回滚是纯配置回退，
+不需要任何数据恢复。
+
+### 10.1 最快回滚：换回上一个镜像
+
+生产上「上一个镜像」是 `sha256:0a4d617a30bede60af56339bc916037d1ec9c5e8c38583d2deebf2c2b68183c0`。
+
+```bash
+cd /root
+# 1) 先备份当前 compose（每次改动都备份，文件名带时间戳）
+cp docker-compose.yml docker-compose.yml.bak-rollback-$(date +%Y%m%d-%H%M%S)
+
+# 2) 把 backend 的 image 改成旧 digest
+#    注意：compose 里 image 写的是 tag，用 digest 需要临时改成本地已有的旧 tag，
+#    或者直接 docker run 旧镜像。最稳妥的方式是：
+docker images --digests | grep flux-panel-backend
+#    找到旧 digest 对应的 image ID，然后：
+#    方式 A：docker tag <旧ImageID> ahmadplayz721/flux-panel-backend:rollback-tmp
+#            sed -i 's#ahmadplayz721/flux-panel-backend:2.0.7-beta#ahmadplayz721/flux-panel-backend:rollback-tmp#' docker-compose.yml
+#    方式 B（推荐，若本地还留有旧镜像层）：直接改回旧 tag 并 docker compose up -d backend
+
+docker compose up -d backend
+docker ps --filter name=springboot-backend --format '{{.Status}}'   # 应为 Up (healthy)
+```
+
+> 若旧镜像已被 `docker image prune` 清掉，则无法换回旧镜像，
+> 只能走 10.2 的「代码级回退 + 重新构建」。
+
+### 10.2 代码级回退（只回退 checkpoint 模式，保留其余改动）
+
+```bash
+cd /root/v2.0.7-beta
+git revert --no-edit a4d2f85      # 只回退这一个提交
+# 或者手工改回：
+#   SQLiteConfig.java  performCheckpoint() 里 PASSIVE → TRUNCATE
+#   application.yml    url 里去掉 journal_mode/synchronous/cache_size/temp_store，
+#                      只保留 ?busy_timeout=5000
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta ./springboot-backend
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+cd /root && docker compose pull backend && docker compose up -d backend
+```
+
+### 10.3 单独回退 PRAGMA（不回退 checkpoint 模式）
+
+如果只是想恢复「驱动默认提交语义」，把 URL 改回 `?busy_timeout=5000` 即可，
+`PASSIVE` checkpoint 可以保留 —— 两者互相独立，**推荐保留 PASSIVE**。
+
+### 10.4 绝不能做的事
+
+| ❌ 不要 | 原因 |
+|---|---|
+| 往 URL 里加 `wal_autocheckpoint` 或其他未验证参数 | 会让 sqlite-jdbc 静默打开空库，面板数据全部「消失」（原库仍在，但应用读不到） |
+| 回滚时删掉 `/app/data/gost.db` 或 `sqlite_data` 卷 | 那是唯一的数据源，删了无法恢复 |
+| 用 `docker compose down -v` | `-v` 会连 `sqlite_data` 卷一起删掉 |
+| 把 `PASSIVE` 也改回 `TRUNCATE` 后不再观察 | TRUNCATE 会重新引入上报超时（实测 10022ms 持锁） |
+
+### 10.5 回滚后的必查项
+
+```bash
+docker exec springboot-backend sqlite3 /app/data/gost.db \
+  "SELECT COUNT(*) FROM forward; SELECT COUNT(*) FROM node; SELECT COUNT(*) FROM user;"
+#   应为 109 / 4 / 1
+
+docker exec springboot-backend ls -l /app/data/
+#   不得出现文件名带 ? 的怪文件
+
+journalctl -u flux_agent --since "-10 minutes" | grep -c "❌ 全局流量上报失败"
+#   回滚后若该数字开始上涨，说明 TRUNCATE 争用问题回来了
+```
+
+### 10.6 数据库备份（回滚前建议先做一次）
+
+```bash
+docker exec springboot-backend sqlite3 /app/data/gost.db '.backup /tmp/pre-rollback.db'
+docker cp springboot-backend:/tmp/pre-rollback.db /root/pre-rollback-$(date +%Y%m%d-%H%M%S).db
+ls -l /root/pre-rollback-*.db
+```
+
+> 注意必须用 `.backup`，**不能**直接 `docker cp` 复制 `gost.db`：
+> 该库处于 WAL 模式，未合并的 WAL 里有最新数据，直接拷主库文件会丢掉这部分。

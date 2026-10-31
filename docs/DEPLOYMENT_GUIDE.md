@@ -10,7 +10,7 @@
 
 ## 0. 当前生产状态（重要）
 
-截至本文档编写时，生产上已经做了 3 处变更，**还有一批代码改动没有上线**：
+截至 2026-11-01 06:05，生产上已上线 5 轮变更，**仅剩 Go agent 侧的改动与前端日志轮转未上线**：
 
 | 类别 | 内容 | 状态 |
 |---|---|---|
@@ -18,6 +18,7 @@
 | ✅ 已生效 | `GOMEMLIMIT=512MiB`（systemd drop-in，2026-10-31 14:42 由 1200MiB 收紧） | agent 已重启 |
 | ✅ 已生效 | pprof 监听 `127.0.0.1:6060` | agent 已重启 |
 | ✅ 已上线 | `ForwardServiceImpl` 批量查询、`application.yml` 键名修正与 `busy_timeout`、`LogAspect` 日志截断、`logback` 调整 | 镜像 `sha256:0a4d617a…` 已部署 |
+| ✅ 已上线（2026-11-01 06:05） | checkpoint `TRUNCATE→PASSIVE`、连接级 PRAGMA 移入 JDBC URL、`SqliteDatasourceUrlTest`、`JwtUtilTest` 修正 | 镜像 `sha256:c42978b6…` 已部署，`Up (healthy)`、`Restarts=0`、数据 109/4/1 完好 |
 | ❌ 未上线 | Go agent 的 `GOMEMLIMIT` 内置默认值、日志级别、`init()` 重构 | **需要重建二进制** |
 | ⚠️ 部分生效 | 容器日志轮转 `10m×3` | backend 已生效；`vite-frontend` 的 `HostConfig.LogConfig.Config` 仍为 `{}`，**需再次重建才应用** |
 
@@ -318,3 +319,101 @@ systemctl restart flux_agent
 | 把 pprof 改成 `0.0.0.0:6060` | 等于把性能剖析接口暴露到公网 |
 | `git reset --hard` / `git clean -fd` | 会丢失未提交改动 |
 | 在生产直接 `go test` | `x/service` 包的 `init()` 历史上会 `log.Fatal` 让测试进程退出 |
+
+
+---
+
+## 7. 第五轮上线记录（2026-11-01 06:05 CST）
+
+### 7.1 上线内容
+
+| 文件 | 改动 |
+|---|---|
+| `springboot-backend/src/main/java/com/admin/config/SQLiteConfig.java` | `performCheckpoint()` 的 `wal_checkpoint(TRUNCATE)` → `wal_checkpoint(PASSIVE)`；`onShutdown()` 仍保留 TRUNCATE |
+| `springboot-backend/src/main/resources/application.yml` | URL 追加 `journal_mode=WAL&synchronous=NORMAL&busy_timeout=5000&cache_size=-8000&temp_store=MEMORY` |
+| `springboot-backend/src/test/java/com/admin/config/SqliteDatasourceUrlTest.java` | 新增，4 个护栏用例 |
+| `springboot-backend/src/test/java/com/admin/common/utils/JwtUtilTest.java` | 修正 `cachedTokenStillExpires` 的间歇失败 |
+
+### 7.2 上线步骤（本次实际执行的命令）
+
+```bash
+# 1) 构建并核对镜像内容 —— 不要只看构建成功
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta ./springboot-backend
+cid=$(docker create ahmadplayz721/flux-panel-backend:2.0.7-beta)
+docker cp "$cid":/app/app.jar /tmp/verify/app.jar && docker rm "$cid"
+python3 -c '
+import zipfile
+z = zipfile.ZipFile("/tmp/verify/app.jar")
+y = z.read("BOOT-INF/classes/application.yml").decode()
+url = [l for l in y.splitlines() if l.strip().startswith("url:")][0]
+assert "wal_autocheckpoint" not in url, "URL 含未知参数，会静默打开空库"
+d = z.read("BOOT-INF/classes/com/admin/config/SQLiteConfig.class")
+assert b"wal_checkpoint(PASSIVE)" in d
+print("镜像核对通过:", url.strip())
+'
+
+# 2) 推送
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+
+# 3) 生产：备份 compose 后拉取并重建
+#    注意 compose 里的服务名是 backend，不是 springboot-backend
+cd /root
+cp docker-compose.yml docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)
+docker compose pull backend
+docker compose up -d backend
+```
+
+**踩坑记录**：`docker compose pull springboot-backend` 会报 `no such service`。
+生产 `/root/docker-compose.yml` 的服务名是 `backend` / `frontend`，
+容器名才是 `springboot-backend` / `vite-frontend`，两者不是一回事。
+
+### 7.3 上线后必查（本次全部通过）
+
+```bash
+docker ps --filter name=springboot-backend --format '{{.Status}}'          # Up (healthy)
+docker inspect --format 'Restarts={{.RestartCount}}' springboot-backend    # 0
+docker exec springboot-backend sqlite3 /app/data/gost.db \
+  "SELECT COUNT(*) FROM forward; SELECT COUNT(*) FROM node; SELECT COUNT(*) FROM user;"
+#   期望 109 / 4 / 1（与上线前一致）
+docker exec springboot-backend ls -l /app/data/
+#   只应有 gost.db / gost.db-wal / gost.db-shm，不得出现文件名带 ? 的怪文件
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:6365/flow/test    # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:6366/            # 200
+curl -s -o /dev/null -w '%{http_code}\n' 'http://[::1]:6366/'              # 200（IPv6）
+docker logs --since 10m springboot-backend 2>&1 | grep -c SQLITE_BUSY      # 0
+```
+
+### 7.4 已知的正常现象
+
+- 重建窗口内 agent 会出现 1~3 条 `❌ ... connection refused`（本次为
+  06:05:42、06:05:43、06:05:47 三条）。容器起来后自动恢复，**不是回归**。
+- `docker stats` 里新容器内存会明显低于旧容器（本次 320 MiB vs 459 MiB），
+  但这是 JVM 刚重启未预热导致的，**不能当作内存优化成绩**。
+
+### 7.5 `/app/data/` 里的实验残留必须清掉
+
+在生产卷上做基准测试会留下 `_latbench.db`、`_ckrace.db?busy_timeout=5000` 这类文件。
+后者是 python `sqlite3.connect()` 不带 `uri=True` 时误建的（见
+`docs/evidence/checkpoint-race-2026-11-01.md` 的「复现脚本」一节）。
+本次已删除，清理后目录只剩 `gost.db` / `gost.db-shm` / `gost.db-wal`（共约 3 MB）。
+
+清理命令：
+
+```bash
+cd /var/lib/docker/volumes/sqlite_data/_data
+ls -la                      # 先看清楚再删
+rm -f "_latbench.db" _ckrace.db* _dbg.db* "_ckrace.db?busy_timeout=5000" "_dbg.db?busy_timeout=5000"
+ls -la                      # 应只剩 gost.db / -wal / -shm
+```
+
+### 7.6 下一步：Go agent 侧仍未上线
+
+本轮**没有**改动 agent 二进制。生产 `/etc/flux_agent/flux_agent` 仍是
+8,327,088 字节的 UPX 上游版本，因此：
+
+- agent 的 `applyMemoryLimit()`（内置 1200 MiB 默认值、`FLUX_AGENT_MEMLIMIT` 开关、
+  日志来源标注）**在生产不生效**，但 `GOMEMLIMIT=512MiB` 这个环境变量仍由
+  Go 运行时原生读取并生效（已用 `GODEBUG=gctrace=1` 实证）。
+- 若要启用内置默认值与日志级别修改，需按 §1 用自建二进制
+  （Release `2.0.7-beta-perf` 的 `gost-amd64`，32,088,216 字节）替换。
+- 前端容器的 `HostConfig.LogConfig.Config` 仍为 `{}`，需再次重建才应用日志轮转。
