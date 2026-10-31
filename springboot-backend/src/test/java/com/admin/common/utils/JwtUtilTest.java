@@ -87,8 +87,11 @@ class JwtUtilTest {
 
     @Test
     @DisplayName("缓存不会把过期 token 一直判为有效")
-    void cachedTokenStillExpires() {
-        long soon = System.currentTimeMillis() / 1000 + 1;
+    void cachedTokenStillExpires() throws InterruptedException {
+        // 过期时间要留足余量：validateToken 以“整秒”比较（exp > now/1000），
+        // 原先写死 now+1 秒，只要线程恰好跨过秒边界就会在第一次断言前失效，
+        // 导致这条用例间歇性失败（与本类要验证的缓存行为无关）。
+        long soon = System.currentTimeMillis() / 1000 + 3;
         String header = base64("{\"alg\":\"HmacSHA256\",\"typ\":\"JWT\"}");
         String payload = base64("{\"sub\":\"2\",\"exp\":" + soon + ",\"name\":\"alice\",\"role_id\":0}");
         String token = header + "." + payload + "." + signature(header, payload);
@@ -96,6 +99,12 @@ class JwtUtilTest {
         assertTrue(JwtUtil.validateToken(token));
         // 同一个 token 再次校验仍然走缓存分支，但有效期是每次重新判断的
         assertTrue(JwtUtil.validateToken(token));
+
+        // 等到真正过期后再校验：缓存命中也不能返回 true
+        while (System.currentTimeMillis() / 1000 <= soon) {
+            Thread.sleep(50);
+        }
+        assertFalse(JwtUtil.validateToken(token));
     }
 
     @Test

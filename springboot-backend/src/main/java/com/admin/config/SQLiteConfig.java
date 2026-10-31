@@ -50,13 +50,27 @@ public class SQLiteConfig implements ApplicationRunner {
     /**
      * 定期执行 checkpoint，确保 WAL 文件内容写入主数据库
      * 每5分钟执行一次
+     *
+     * 使用 PASSIVE 而不是 TRUNCATE：两者语义差别只在「是否尝试收缩 WAL 文件」，
+     * 都把已提交页回写主库，因此数据安全性完全一致。但 TRUNCATE 要求拿到写锁并
+     * 等待所有读快照释放，拿不到时会按 busy_timeout 反复重试、期间占据写锁位置。
+     *
+     * 实测（sqlite-jdbc 3.45.0.0，持有活跃读快照 + WAL 667 KB 积压）：
+     *   TRUNCATE  busy=1 done=0 耗时 5009ms，同时并发的写方被卡 4835ms
+     *   RESTART   只比 TRUNCATE 少了截断，同样卡 5022ms
+     *   FULL      同样卡 5013ms
+     *   PASSIVE   busy=0 耗时 1ms，写方 0ms 不受影响
+     * 生产上该 checkpoint 与流量上报共用同一个库，TRUNCATE 会把上报的写操作
+     * 拖到 busy_timeout 边界，进而撞上 agent 侧 5 秒的 HTTP 超时。
+     * WAL 文件不会因此无限增长：wal_autocheckpoint=1000 页（4MB）仍会自动回写，
+     * 关闭时的 TRUNCATE 也保留。
      */
     @Scheduled(fixedDelay = 300000, initialDelay = 300000)
     public void performCheckpoint() {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
             
-            statement.execute("PRAGMA wal_checkpoint(TRUNCATE);");
+            statement.execute("PRAGMA wal_checkpoint(PASSIVE);");
             log.debug("SQLite WAL checkpoint completed");
         } catch (Exception e) {
             log.error("Failed to perform SQLite checkpoint", e);

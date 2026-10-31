@@ -1,12 +1,31 @@
 spring:
   datasource:
     driver-class-name: org.sqlite.JDBC
-    # busy_timeout 必须写在 URL 里：SQLiteConfig 里那条 PRAGMA busy_timeout=5000
-    # 只作用于它自己取到的那一条连接，池中其余连接仍是默认值 0（立即返回 SQLITE_BUSY）。
-    # 生产实测：流量上报并发写 forward 表时出现
-    #   SQLITE_BUSY: The database file is locked (database is locked)
-    # 导致整批流量统计丢失。写在 URL 上由驱动对每条新连接生效。
-    url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}?busy_timeout=5000
+    # 【连接级 PRAGMA 必须写在 URL 里】
+    # synchronous / cache_size / temp_store / busy_timeout 都是连接级设置，
+    # SQLiteConfig.run() 里用 dataSource.getConnection() 取得的是连接池中的一条连接，
+    # 执行完归还后只影响这一条；池中其余连接仍是驱动默认值。
+    # 实测（sqlite-jdbc 3.45.0.0，无参数连接）：journal_mode=delete synchronous=2(FULL)
+    #   cache_size=-2000 temp_store=0 busy_timeout=3000 —— 与 SQLiteConfig 期望的
+    #   WAL/NORMAL/-8000/MEMORY/5000 不一致，同一应用里两种提交语义并存。
+    # 已验证 URL 参数对每条新建连接都生效（连开 5 条连接逐一读取 PRAGMA 均为期望值），
+    # 生产上由 Hikari 每条新连接执行，因此不再依赖 SQLiteConfig 里那一次设置。
+    # cache_size 取 8MB/连接：生产库文件仅 2.3MB，页缓存实际分配不会超过库大小，
+    # 故不会出现 10 连接 × 64MB 的额外占用（原 -64000 也只作用于一条连接）。
+    # 【为什么 synchronous 从 FULL 改成 NORMAL】实测生产库（109 条 forward、共享同一
+    #   库文件、3 线程并发各写 109 条），同一份数据多轮对照：
+    #     FULL   墙钟 260~323ms，单条最长 131~231ms
+    #     NORMAL 墙钟 31~38ms，单条最长 1.5~8.5ms
+    #   流量统计是每 5 秒一批的可重算增量，断电最多丢最后几秒统计值，不影响业务数据，
+    #   因此用 8 倍写路径提速换这点风险是合理取舍。
+    # 【严禁加入驱动不识别的参数】sqlite-jdbc 只认有限的一组参数名；遇到不认识的名字会
+    # 直接停止解析，并把"剩余的整段 ?xxx"当成数据库文件名的一部分，于是打开一个新建的空库
+    # ——不是报错，而是静默丢数据（面板上所有转发/用户/统计全部"消失"，原库文件仍在原地）。
+    # 实测（sqlite-jdbc 3.45.0.0）：?wal_autocheckpoint=1000、?auto_vacuum=0、?foo=1 都会生成
+    #   gost.db?wal_autocheckpoint=1000 这样的怪文件，读取该连接立刻报 no such table: forward。
+    # 因此下面只允许出现已验证被识别的参数：journal_mode / synchronous / busy_timeout /
+    #   cache_size / temp_store。wal_autocheckpoint 必须由 SQLiteConfig 用 PRAGMA 语句设置。
+    url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}?journal_mode=WAL&synchronous=NORMAL&busy_timeout=5000&cache_size=-8000&temp_store=MEMORY
     # 说明：原配置写的是 max-pool-size，HikariConfig 只有 setMaximumPoolSize，
     # 该键无法绑定，Spring Boot 会静默忽略，实际一直走 Hikari 默认值 10。
     # 生产实测确认：容器启动日志出现
