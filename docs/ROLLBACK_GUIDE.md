@@ -94,9 +94,34 @@ systemctl show flux_agent -p Environment
 
 ```bash
 systemctl edit flux_agent     # 交互式编辑 drop-in
-# 改成 Environment="GOMEMLIMIT=1600MiB" 之类
+# 改成 Environment="GOMEMLIMIT=1200MiB" 之类
 systemctl daemon-reload && systemctl restart flux_agent
 ```
+
+**当前生产值：`512MiB`**（2026-10-31 14:42 由 1200MiB 收紧）。
+
+若要恢复到收紧前的状态：
+
+```bash
+cp /root/backup_20261031_memlimit/override.conf.orig \
+   /etc/systemd/system/flux_agent.service.d/override.conf
+systemctl daemon-reload && systemctl restart flux_agent
+systemctl show flux_agent -p Environment    # 期望: GOMEMLIMIT=1200MiB
+```
+
+> **实测参考**：512MiB 相对 1200MiB，VmRSS 288~313 → 214~274 MB，
+> AnonHugePages 256 → 108~188 MB，NumGC 33 → 38 次/小时，报错 0 条。
+> 收益不稳定且小于 200 MB；是否值得保留由你判断，回滚成本极低。
+
+### 2.4 停止趋势采样器（若不需要继续观测）
+
+```bash
+systemctl disable --now flux-watch      # 1 分钟采样，输出 /root/flux_watch.csv
+systemctl disable --now flux-trend15    # 5 分钟采样，输出 /root/flux_trend15.csv
+```
+
+两个采样器均为只读采集（`/proc`、`ss`、`curl` 回环 pprof），不修改任何业务状态。
+`flux-trend15` 已于 2026-10-31 07:01 完成 15 小时任务，可安全停用。
 
 ---
 

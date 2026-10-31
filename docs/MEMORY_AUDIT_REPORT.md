@@ -666,7 +666,7 @@ docker exec springboot-backend sh -c "command -v jcmd jstat jmap java"
 | 变更 | 位置 | 备份 | 效果（实测） |
 |---|---|---|---|
 | `-Xms256m` → `-Xms64m` + `MaxMetaspaceSize=192m` | `/root/docker-compose.yml` | `backup_20261030_120012/docker-compose.yml.orig` | Java RSS 661,436 → 432,120 kB |
-| `GOMEMLIMIT=1200MiB` | `/etc/systemd/system/flux_agent.service.d/override.conf` | 目录原不存在，删除即还原 | agent MemoryCurrent 2.76 GB → 116 MB |
+| `GOMEMLIMIT=1200MiB` → **512MiB** | `/etc/systemd/system/flux_agent.service.d/override.conf` | 目录原不存在，删除即还原 | agent MemoryCurrent 2.76 GB → 116 MB（重启贡献为主）；收紧到 512MiB 后 VmRSS 288~313 → 214~274 MB、AnonHugePages 256 → 108~188 MB |
 | 开启 pprof（仅回环） | `/etc/flux_agent/gost.json` | `backup_20261030_120012/gost.json.orig` | 拿到首个真实堆画像 |
 
 **未执行的变更**：relay 连接回收修复（根因未定位）、Docker 日志轮转（需容器重建）、任何数据库/API/认证改动。

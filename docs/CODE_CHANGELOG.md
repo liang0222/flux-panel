@@ -639,10 +639,12 @@ cd go-gost && go test -run TestParseMemoryLimit -v .
 # Go runtime 内存软上限（软限制，超限不会 OOM Kill，只让 GC 更积极并归还内存给 OS）
 # 依据：实测 VmHWM 2717452kB 与 VmRSS 2672112kB 仅差 37MiB，堆峰值后不归还；
 # 且 /proc/<pid>/environ 与 systemd Environment 均未设置 GOGC/GOMEMLIMIT。
-Environment="GOMEMLIMIT=1200MiB"
+Environment="GOMEMLIMIT=512MiB"
 ```
 
-生效方式：`systemctl daemon-reload && systemctl restart flux_agent`（已执行，agent 于 12:01:46 重启）。
+生效方式：`systemctl daemon-reload && systemctl restart flux_agent`。
+
+> **变更历史**：12:01:46 首次以 `1200MiB` 重启；2026-10-31 14:42:22 **收紧为 512MiB** 后再次重启（备份 `/root/backup_20261031_memlimit/override.conf.orig`，md5 校验一致）。三小时实测：VmRSS 288~313 → 214~274 MB、AnonHugePages 256 → 108~188 MB、NumGC ≈38 次/小时（改前 33）、报错 0、转发正常。**收益不稳定且小于早前估计的 200 MB**，机制见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §7.2。
 
 > **注意**：当前生产运行的 agent 二进制是**旧版本**（未包含第 12 节的 `applyMemoryLimit` 代码），因此这个 `Environment` 是 Go runtime **原生识别**的 `GOMEMLIMIT` 变量，直接生效，不依赖新代码。这也意味着**部署新二进制后，环境变量优先级高于代码默认值，行为一致**。
 

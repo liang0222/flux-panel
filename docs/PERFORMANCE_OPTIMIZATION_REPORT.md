@@ -443,12 +443,14 @@ Go 的默认 GC 策略是 `GOGC=100`：堆涨到上次 GC 后存活量的 2 倍�
 
 ```ini
 [Service]
-Environment="GOMEMLIMIT=1200MiB"
+Environment="GOMEMLIMIT=512MiB"
 ```
 
-> 生产当前跑的是旧二进制，但 `GOMEMLIMIT` 是 **Go runtime 原生识别**的环境变量，**不依赖新代码**，因此立即生效。
+> 生产当前跑的是旧二进制（8,327,088 字节 UPX 上游版），但 `GOMEMLIMIT` 是 **Go runtime 原生识别**的环境变量，**不依赖新代码**，因此立即生效（已用 `GODEBUG=gctrace=1` 实证）。
+>
+> **2026-10-31 14:42 由 1200MiB 收紧到 512MiB**，三小时实测 VmRSS 288~313 → 214~274 MB、AnonHugePages 256 → 108~188 MB、NumGC 33 → 38 次/小时、报错 0 条。收益**不稳定且小于早前估计的 200 MB**，真实机制见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §7.2。
 
-### 12.4 为什么是 1200 MiB 而不是更低
+### 12.4 为什么最初是 1200 MiB，以及后来为何收紧到 512 MiB
 
 | 候选值 | 风险 |
 |---|---|
@@ -614,7 +616,7 @@ journalctl -u flux_agent --since '5 min ago' | wc -l → 1 行
 | 保留多节点 | ✅ | `gost.json` 212 个 service 一个未动 |
 | 不降低认证安全性 | ✅ | 未触碰 JWT、密码、权限 |
 | 不设置过低 JVM 堆 | ✅ | `-Xmx512m` 未动，只降 `-Xms` |
-| 不盲目提高 GC 频率 | ✅ | `GOMEMLIMIT=1200MiB` 是宽松护栏，非激进压制 |
+| 不盲目提高 GC 频率 | ✅ | `GOMEMLIMIT=512MiB` 实测 38 次/小时 vs 改前 33 次/小时，**仅 +15%**，非激进压制 |
 | 不用 Docker 低内存限制掩盖泄漏 | ✅ | 未设置任何 `mem_limit` |
 | 不编造下降比例 | ✅ | 明确区分"重启贡献"与"优化贡献" |
 | 改动可回滚 | ✅ | 每项都有独立还原方式，生产变更均有备份 |

@@ -657,7 +657,7 @@ curl -s -o /tmp/heap.prof "http://127.0.0.1:6060/debug/pprof/heap"
 # 编辑 unit，加环境变量（不改二进制、不改配置格式）
 systemctl edit flux_agent --full
 # 在 [Service] 段增加：
-#   Environment="GOMEMLIMIT=1200MiB"
+#   Environment="GOMEMLIMIT=512MiB"   # 最初 1200MiB，2026-10-31 收紧
 #   Environment="GOGC=50"
 
 systemctl daemon-reload && systemctl restart flux_agent
@@ -667,10 +667,46 @@ watch -n 30 'grep VmRSS /proc/$(systemctl show -p MainPID --value flux_agent)/st
 ```
 
 **说明**：
-- `GOMEMLIMIT=1200MiB`：告诉 Go runtime "软上限 1.2 GiB"，它会**更积极地把空闲页还给 OS**。这是软限制，超限不会 OOM Kill，只是 GC 更频繁。
-- `GOGC=50`：GC 目标从 2× 降到 1.5×，堆更紧凑，代价是 GC CPU 略增。
+- `GOMEMLIMIT=512MiB`：告诉 Go runtime "软上限 512 MiB"。超限不会 OOM Kill，只会让 GC 更早触发。**注意：它管不到 Go arena 向 OS 的归还**（见本节后续实测修正）。
+- `GOGC=50`：GC 目标从 2× 降到 1.5×。**本次未采用**（会显著增加 GC 次数，收益未验证）。
 
-**取舍必须说明**：这**不是"免费的省内存"**。GC 更频繁 → CPU 上升。当前 agent 已占 30% 单核、系统 CPU 空闲 95%，**有余量**；但若流量上升，更频繁的 GC 可能成为新瓶颈。**建议先只上 `GOMEMLIMIT`，观察 24 小时 CPU 与延迟**，再决定是否加 `GOGC`。
+**⚠️ 2026-10-31 修正：上面这段对机制的解释不准确，已实测推翻。**
+
+当时的假设是「`GOMEMLIMIT` 会让 Go 更积极把空闲页还给 OS」。实测结果：
+
+1. **`GOMEMLIMIT` 管不到 arena 归还**。它只约束 GC 触发时机（heap goal），
+   而 `HeapReleased`（真正 `madvise` 归还的部分）由 scavenger 按另一套节奏推进。
+2. 本机 A/B 实验（300 MB 峰值后静默）：
+
+   | 场景 | 峰值 | 静默后 RSS | HeapReleased |
+   |---|---:|---:|---:|
+   | 无 GOMEMLIMIT | 300 MB | **300 MB** | 1 MB |
+   | GOMEMLIMIT=1200MiB | 300 MB | **300 MB** | 1 MB |
+   | GOMEMLIMIT=512MiB | 300 MB | 299 MB | 1 MB |
+   | GOMEMLIMIT=200MiB（低于峰值） | 300 MB | **4 MB** | 300 MB |
+
+   → **只有当上限低于实际峰值时，scavenger 才会被真正触发**。上限高于峰值等于没设。
+3. 但换成贴近生产的 **持续 churn 模型**（大量短命 64 KB 分配 + 小活跃集），
+   结论又变了：末 RSS 在 7~19 MB，`GOMEMLIMIT` 取值几乎无影响。
+   → 说明生产那 200+ MB **不是 GC 时机问题**。
+
+**生产实测（2026-10-31，PID 659373）**：
+
+```
+smaps_rollup:  Rss 233,148 kB / LazyFree 0 kB / AnonHugePages 215,040 kB
+Go heap VMA c000000000-c00d400000:
+  Rss 186,996 kB / Private_Dirty 186,996 kB / LazyFree 0 kB / AnonHugePages 176,128 kB
+heap profile:  132: 7,485,424 [1897: 20,464,816]   ← 活跃堆仅 7.5 MB
+```
+
+**活跃堆 7.5 MB，RSS 233 MB，其中 187 MB 在一块 Go heap arena 里、94% 是大页、`LazyFree=0`（脏页未标记可回收）。**
+
+这是 **Go 分配器保留 arena + THP 把 2 MB 大页钉住** 的组合结果，
+不是「GC 不跑」，也不是「代码分配泄漏」。
+
+**修正后的收益归因**：`GOMEMLIMIT` 1200→512 MiB 实测把 RSS 从 288~313 MB
+降到 214~247 MB（约 60~90 MB），HWM 310→262 MB。**比原先宣称的收益小得多**，
+且 RSS 随负载在区间内波动，不固定在低位。
 
 **风险评级**：中低。可随时 `systemctl edit --full` 改回并重启。
 
@@ -858,14 +894,32 @@ scavenger 逐步归还，不适合用「RSS 没立刻降」判定泄漏。
 - 判定是否仍有慢速累积，**必须看 24 小时趋势**，并以「相同连接数下
   RSS 是否随时间抬升」为准，而不是看绝对 RSS。
 
+**24 小时趋势结论（2026-10-31 补，182 个采样点 / 14.94 小时）**：
+
+按小时均值，agent RSS 在 **00:00–07:00 八小时内只从 296 MB 动到 299 MB**：
+
+```
+15时 254MB  16时 269MB  17时 275MB  18时 285MB  19时 293MB
+20时 281MB  21时 278MB  22时 280MB  23时 288MB
+00时 296MB  01时 296MB  02时 294MB  03时 295MB
+04时 294MB  05时 296MB  06时 296MB  07时 299MB
+```
+
+而同期连接数从 929 掉到 282（−68%）。**连接数大幅下降而 RSS 不降**，
+说明 RSS 由 THP 相位决定，不由连接数决定。
+连续运行 23 小时 58 分、`NRestarts=0`，**没有发现持续泄漏**。
+
+Java 侧同样进入平台期：23 时起 447→459 MB，之后每小时波动 <1 MB。
+
 ### 11.6 已生效的兜底措施
 
-- `Environment=GOMEMLIMIT=1200MiB` 已写入
-  `/etc/systemd/system/flux_agent.service.d/override.conf`。
-- 作用：即使再次出现无界增长，Go 运行时也会在堆接近 1.2 GB 时强制更积极的 GC，
-  把最坏情况从「涨到 2.6 GB 甚至触发 OOM」压到「约 1.2 GB 以内」。
-- **这不是修复，是兜底**。它不阻止增长，只约束增长的上限。
-  真正的修复需要先定位累积源，而这需要 24 小时趋势 + 高负载下的 pprof 差分。
+- `Environment=GOMEMLIMIT=512MiB` 已写入
+  `/etc/systemd/system/flux_agent.service.d/override.conf`
+  （2026-10-31 14:42 由 1200MiB 收紧，备份 `/root/backup_20261031_memlimit/`）。
+- 作用：堆接近 512 MiB 时让 GC 提前触发。**实测收益约 60~90 MB，不是 200 MB**。
+- **这不是修复，是兜底**。它不阻止 arena 保留，只约束 GC 时机。
+  真正的降内存手段是处理 THP（宿主 `enabled=[always]` → `madvise`），
+  但那会影响整机所有进程，未执行。
 
 ### 11.7 复核用的命令
 

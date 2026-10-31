@@ -374,3 +374,30 @@ cat /sys/fs/cgroup/system.slice/flux_agent.service/memory.events
 ```
 
 `memory.events` 里 `oom` 和 `oom_kill` 都是 0 才算没被 OOM。
+
+---
+
+## 附：生产上已部署的两个采样器（2026-10-31）
+
+| 服务 | 间隔 | 输出 | 列数 | 用途 |
+|---|---|---|---|---|
+| `flux-trend15.service` | 300 秒 | `/root/flux_trend15.csv` | 24 | 15 小时趋势（已完成） |
+| `flux-watch.service` | 60 秒 | `/root/flux_watch.csv` | 11 | 收紧 GOMEMLIMIT 后复核 |
+
+`flux_watch.csv` 列定义：
+`ts, agent_rss_kb, agent_hwm_kb, agent_huge_kb, agent_fds, agent_goroutines, agent_estab, to1000, java_rss_kb, mem_avail_kb, psi_some`
+
+**已知解析坑**：`curl .../debug/pprof/goroutine?debug=1 | head -1` 的输出是
+`goroutine profile: total 1234`，goroutine 数在 **第 4 个字段**（`awk '{print $4}'`），
+不是第 3 个。写成 `$3` 会得到字符串 `total`。
+
+### 判断是否泄漏的正确方法
+
+- **不要**用 `goroutine / 连接数` 的比值判定。该比值随负载变化
+  （连接 400 时约 4.7，连接 925 时约 2.2），比值下降不代表 goroutine 泄漏。
+- **应**对 goroutine 与 estab 做线性回归，看**截距**是否稳定在约 424
+  （212 service + 106 TCP listener + 106 UDP listener）。
+  截距稳定即无泄漏，截距单调上升才是泄漏。
+- RSS 与连接数的相关性：3 小时数据实测 Pearson **r = 0.920**，
+  但 15 小时数据显示连接数下降 68% 时 RSS 反升 17% ——
+  **RSS 主要由 THP 相位与 Go arena 保留决定，不能单看连接数**。

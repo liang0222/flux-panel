@@ -15,11 +15,13 @@
 | 类别 | 内容 | 状态 |
 |---|---|---|
 | ✅ 已生效 | `JAVA_OPTS` 改为 `-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m` | 容器已重建 |
-| ✅ 已生效 | `GOMEMLIMIT=1200MiB`（systemd drop-in） | agent 已重启 |
+| ✅ 已生效 | `GOMEMLIMIT=512MiB`（systemd drop-in，2026-10-31 14:42 由 1200MiB 收紧） | agent 已重启 |
 | ✅ 已生效 | pprof 监听 `127.0.0.1:6060` | agent 已重启 |
-| ❌ 未上线 | `ForwardServiceImpl` 批量查询、`application.yml` 键名修正、`logback` 调整 | **需要重建镜像** |
+| ✅ 已上线 | `ForwardServiceImpl` 批量查询、`application.yml` 键名修正与 `busy_timeout`、`LogAspect` 日志截断、`logback` 调整 | 镜像 `sha256:0a4d617a…` 已部署 |
 | ❌ 未上线 | Go agent 的 `GOMEMLIMIT` 内置默认值、日志级别、`init()` 重构 | **需要重建二进制** |
-| ❌ 未生效 | 容器日志轮转 `10m×3` | 已写入 compose，**需容器重建** |
+| ⚠️ 部分生效 | 容器日志轮转 `10m×3` | backend 已生效；`vite-frontend` 的 `HostConfig.LogConfig.Config` 仍为 `{}`，**需再次重建才应用** |
+
+> **关于 agent 二进制的重要事实（2026-10-31 核实）**：生产 `/etc/flux_agent/flux_agent` 是 **8,327,088 字节、UPX 加壳**的上游版本，**不是**本次构建的 32,088,216 字节版本。因此生产 agent **不含** `applyMemoryLimit()` 代码，`GOMEMLIMIT` 完全依赖 Go 运行时原生读取环境变量生效（已用 `GODEBUG=gctrace=1` 实证）。自建二进制的部署路径**尚未在生产走过**。
 
 **下面 §1 讲如何处理未上线的代码，§2 讲已生效变更的复核，§3 讲完整发布流程。**
 
@@ -113,8 +115,8 @@ systemctl status flux_agent --no-pager
 **验证点**：
 
 ```bash
-# 1) 新代码的默认值应被环境变量的同名值覆盖（GOMEMLIMIT=1200MiB 优先生效）
-systemctl show flux_agent -p Environment          # 应有 GOMEMLIMIT=1200MiB
+# 1) 环境变量的值应覆盖代码内置默认值（当前生产值 512MiB）
+systemctl show flux_agent -p Environment          # 应有 GOMEMLIMIT=512MiB
 P=$(systemctl show -p MainPID --value flux_agent)
 grep -E "VmRSS|VmHWM" /proc/$P/status
 
@@ -142,11 +144,11 @@ cd /root && docker compose up -d frontend
 
 ```bash
 systemctl show flux_agent -p Environment
-# 期望: Environment=GOMEMLIMIT=1200MiB
+# 期望: Environment=GOMEMLIMIT=512MiB
 
 P=$(systemctl show -p MainPID --value flux_agent)
 tr '\0' '\n' < /proc/$P/environ | grep -i GOMEMLIMIT
-# 期望: GOMEMLIMIT=1200MiB
+# 期望: GOMEMLIMIT=512MiB
 ```
 
 ### 2.2 确认 pprof 只在回环
@@ -312,7 +314,7 @@ systemctl restart flux_agent
 | 在根目录 `docker compose up -d` | 会因 `${JWT_SECRET}` 未定义而失败 |
 | 给容器设 `mem_limit: 400m` 之类 | 会 OOMKilled，且是"用低限制掩盖问题" |
 | 把 `-Xmx512m` 调到 128m | 实测堆已用到 43~82 MB，128m 余量不足 |
-| 把 `GOMEMLIMIT` 设到 200MiB 以下 | 会引发 GC 抖动，降低转发吞吐 |
+| 把 `GOMEMLIMIT` 设到 200MiB 以下 | 会引发 GC 抖动，降低转发吞吐（512MiB 实测无副作用，见 §2.1 注） |
 | 把 pprof 改成 `0.0.0.0:6060` | 等于把性能剖析接口暴露到公网 |
 | `git reset --hard` / `git clean -fd` | 会丢失未提交改动 |
 | 在生产直接 `go test` | `x/service` 包的 `init()` 历史上会 `log.Fatal` 让测试进程退出 |
