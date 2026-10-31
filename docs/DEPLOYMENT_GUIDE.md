@@ -10,7 +10,7 @@
 
 ## 0. 当前生产状态（重要）
 
-截至 2026-11-01 06:05，生产上已上线 5 轮变更，**仅剩 Go agent 侧的改动与前端日志轮转未上线**：
+截至 2026-11-01 06:05，生产上已上线 5 轮变更，**仅剩 Go agent 侧的二进制改动未上线**：
 
 | 类别 | 内容 | 状态 |
 |---|---|---|
@@ -20,7 +20,7 @@
 | ✅ 已上线 | `ForwardServiceImpl` 批量查询、`application.yml` 键名修正与 `busy_timeout`、`LogAspect` 日志截断、`logback` 调整 | 镜像 `sha256:0a4d617a…` 已部署 |
 | ✅ 已上线（2026-11-01 06:05） | checkpoint `TRUNCATE→PASSIVE`、连接级 PRAGMA 移入 JDBC URL、`SqliteDatasourceUrlTest`、`JwtUtilTest` 修正 | 镜像 `sha256:c42978b6…` 已部署，`Up (healthy)`、`Restarts=0`、数据 109/4/1 完好 |
 | ❌ 未上线 | Go agent 的 `GOMEMLIMIT` 内置默认值、日志级别、`init()` 重构 | **需要重建二进制** |
-| ⚠️ 部分生效 | 容器日志轮转 `10m×3` | backend 已生效；`vite-frontend` 的 `HostConfig.LogConfig.Config` 仍为 `{}`，**需再次重建才应用** |
+| ✅ 已生效 | 容器日志轮转 `10m×3` | 2026-11-01 复核：backend 与 frontend 的 `HostConfig.LogConfig` 均为 `{"Type":"json-file","Config":{"max-file":"3","max-size":"10m"}}` |
 
 > **关于 agent 二进制的重要事实（2026-10-31 核实）**：生产 `/etc/flux_agent/flux_agent` 是 **8,327,088 字节、UPX 加壳**的上游版本，**不是**本次构建的 32,088,216 字节版本。因此生产 agent **不含** `applyMemoryLimit()` 代码，`GOMEMLIMIT` 完全依赖 Go 运行时原生读取环境变量生效（已用 `GODEBUG=gctrace=1` 实证）。自建二进制的部署路径**尚未在生产走过**。
 
