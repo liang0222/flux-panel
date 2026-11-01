@@ -486,3 +486,70 @@ print([l.strip() for l in y.splitlines() if l.strip().startswith("url:")][0])
 | 无怪文件 | `docker exec springboot-backend ls /app/data/` | 不含带 `?` 的文件名 |
 | 上报节拍 | `docker logs --since 2m springboot-backend 2>&1 \| grep -c uploadFlowData` | 约 24（每 5 秒一条） |
 | 写库无错 | `docker logs --since 5m springboot-backend 2>&1 \| grep -c 'Error updating database'` | `0` |
+
+---
+
+## 11. 三个「一眼看穿」的判定方法（2026-11-01 补）
+
+前几节都是命令清单，这一节是判读方法 —— 拿到数字后怎么下结论。
+
+### 11.1 判「有没有泄漏」看 HWM，不看末态 RSS
+
+```bash
+grep VmHWM /proc/$(systemctl show -p MainPID --value flux_agent)/status
+```
+
+`VmHWM` 是内核记录的历史峰值 RSS，只有真的超过才会更新。
+
+- **16 小时 HWM 完全没变** → 这期间从没占用过更多物理内存，可以排除持续泄漏。
+- 末态 RSS 比初态低 → **不能**作为证据，因为采样时刻正好落在 GC 前后会差几十 MB。
+
+本项目实测：`agent_hwm` 在 1,679 个样本中恒为 286,712 kB。
+
+### 11.2 判「goroutine 泄漏」看回归截距，不看总数或比值
+
+```bash
+# 采样时同时记 goroutine 数与 estab 连接数，然后做线性回归
+# goroutine = 斜率 × estab + 截距
+```
+
+- goroutine **总数**随连接数变化，直接看总数会把正常波动当成泄漏。
+- goroutine/连接 **比值**也会漂移（连接多时分母大，比值反而变小），同样不可靠。
+- **正确做法**：把时间窗切段分别回归，看**截距**是否随时间上涨。
+  泄漏的 goroutine 会全部落进截距，截距必然逐段抬高。
+
+本项目实测四段截距：672.7 / 677.0 / 674.6 / 676.7 —— 波动 ±2（0.3%），无漂移。
+
+### 11.3 判「Java 内存是否异常」必须扣掉 THP
+
+```bash
+pid=$(docker inspect --format '{{.State.Pid}}' springboot-backend)
+grep -E '^(Rss|AnonHugePages):' /proc/$pid/smaps_rollup
+# 拿堆摘要（非破坏性，只打印到 stdout，进程不会退出）
+docker exec springboot-backend kill -3 1
+docker logs --tail 300 springboot-backend 2>&1 | grep -A4 '^Heap$'
+```
+
+判读公式：
+
+```
+真实提交 ≈ 堆 total + Metaspace committed + 其它（代码缓存/线程栈/GC 结构）
+THP 放大 = AnonHugePages / RSS
+```
+
+本项目实测：提交约 160 MB，RSS 368 MB，AnonHugePages 占 **72%**，放大 2.3 倍。
+
+> 宿主 `/sys/kernel/mm/transparent_hugepage/enabled` 为 `[always]` 时，
+> 碰到 2 MB 大页里的任意 4 KB，整个 2 MB 都会计入 RSS。
+> **这是统计口径问题，不是应用问题。** 只要 PSI 全 0、无 swap、无 OOM，
+> 就不该为了压低这个数字去改 THP 或砍堆上限。
+
+### 11.4 常见误判对照表
+
+| 现象 | 错误结论 | 正确判读 |
+|---|---|---|
+| RSS 比昨天低 | 「优化成功」 | 可能是采样撞上 GC，看 HWM |
+| RSS 台阶式上涨后持平 | 「泄漏」 | 看堆 total 是否同步上涨；THP 相位也会造成台阶 |
+| goroutine 总数从 1000 涨到 2000 | 「泄漏」 | 看同期连接数；做回归看截距 |
+| `docker stats` 内存比 `free` 算出来的多 | 「统计错了」 | 容器含缓存、共享页、大页，口径不同，不能相加 |
+| WAL 文件一直不缩小 | 「checkpoint 失效」 | PASSIVE 模式本就不收缩，看 `log/done` 是否相等 |
