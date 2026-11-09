@@ -1,14 +1,14 @@
 # 交接说明：Flux Panel 隧道断流 / 旧连接残留修复
 
 > 给下一个会话看的进度快照。读完这一页即可继续，不需要回看原对话。
-> 最后更新：2026-11-10 00:50（Asia/Shanghai）
+> 最后更新：2026-11-10 01:15（Asia/Shanghai）
 > 上一个交接（端口流量排行功能）：`docs/port-flow-ranking/handoff.md`
 
 ---
 
 ## 一句话现状
 
-**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端三批缺陷修复 + 日志脱敏 + 前端 24 个 lint error 全部修复并上线；journald 上限已安装；八份交付文档已同步。**
+**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端四批缺陷修复 + 前后端双份日志脱敏 + 前端 24 个 lint error 全部修复并上线；journald 上限已安装；八份交付文档已同步。**
 剩余：`failTimeout` 新值尚未下发到节点（需先配多节点才有意义）、其他节点 agent 仍是旧二进制、node 5 假在线、node 3 整机离线。
 
 ---
@@ -18,7 +18,7 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `/root/v2.0.7-beta` |
-| 当前分支 | `fix/transport-ctx-cancel`（HEAD `64e1bc9`，已 push） |
+| 当前分支 | `fix/transport-ctx-cancel`（HEAD `7d1e603`，已 push） |
 | GitHub | `https://github.com/liang0222/flux-panel`，账号 `liang0222` |
 | GitHub token | 用户已在会话中提供（形如 `ghp_...`）；`gh` 需 `GH_TOKEN=` 前缀，或写进 push URL。**不要把 token 写进仓库文件——GitHub push protection 会拦截** |
 | Docker Hub | 账号 `ahmadplayz721`；token 形如 `dckr_pat_...`，由用户提供，**不入库** |
@@ -95,7 +95,28 @@
 
 **验证**：`eslint --quiet` → **0 problems**；`tsc --noEmit` EXIT=0；`vite build` `✓ built in 11.46s`。
 
-### 2.6 创建失败回滚补全（提交 `d2e38b9`）
+### 2.6 agent 日志 secret 脱敏（提交 `be67a16`、`e4d6ecb`）
+
+节点 secret 等价于登录口令（`/flow/upload?secret=<32 位十六进制>` 直接可用），生产实测被两处以明文写进 journald：
+
+- `WebSocket连接URL: ws://…/system-info?…&secret=<明文>`（`journalctl -u flux_agent | grep -c "secret="` = 17）
+- 上报失败时 `net/http` 的 `*url.Error` 把完整 URL 拼进错误文本：
+  `❌ 全局流量上报失败: … Post "http://…/flow/upload?secret=<明文>": connect: connection refused`
+  —— 面板滚动更新期间每次上报失败打一条，属常态化泄漏。
+
+修法：`go-gost/x/socket/websocket_reporter.go` 与 `go-gost/x/service/traffic_reporter.go` 各加一份
+`maskSecretInURL`（互不依赖），把 secret 值替换为「前 4 + `****` + 后 4」（如 `9e8b****cd88`），
+长度 ≤8 全掩码，解析失败返回占位文案不抛错。URL、建连参数、重试与超时全部未动。
+
+上线：01:06:30（socket 脱敏）、01:09:52（含上报错误脱敏）两次换二进制，`NRestarts=0`，
+`VmRSS 50,736 kB`、`Threads 12`、明文 secret 计数 **0**、`v4=200 v6=200`、`services 166 / chains 1`。
+GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5ef2…`）与
+`gost-arm64`（30,146,712 B，`sha256:1c364276…`）已同步替换。
+
+**历史明文未清理**：`journalctl --vacuum-time` 会连带删除同期全部日志，属破坏性操作，留给运维决策；
+缓解手段是对该节点执行「重置密钥」使旧值失效。其他节点 agent 仍是旧二进制，同样会打印明文。
+
+### 2.7 创建失败回滚补全（提交 `d2e38b9`）
 
 两处「先落库、再逐节点下发」的失败路径回滚不完整，会在节点上留下孤儿配置（agent 重启后自动恢复监听，但面板 DB 无记录、删不掉）：
 
@@ -107,7 +128,7 @@
 
 ---
 
-### 2.7 生产部署（全部已生效）
+### 2.8 生产部署（全部已生效）
 
 | 时间 | 变更 | 验证 |
 | --- | --- | --- |
@@ -119,8 +140,11 @@
 | 00:16 | 后端镜像 `sha256:b0ee363d…`（请求日志脱敏） | `docker logs \| grep -oE '"secret":"[^"]*"'` 全部为 `9e8b****cd88`，明文计数 **0** |
 | 00:25:02 | 前端镜像 `sha256:02d1ee31…`（Hook 顺序、a11y、JSX 转义） | `Up`、`Restarts=0`；`v4=200 v6=200`；线上 chunk `dashboard-D6OLUzFC.js` 含 `role:oe(S.inIp)`、`forward-CsoQnpxe.js` 含 3 处 `onKeyDown` |
 | 00:47:28 | 后端镜像 `sha256:836feb7c…`（创建失败回滚补全） | `Up (healthy)`、`Restarts=0`、`ExitCode=0`；`v4=200 v6=200 front=200`；`integrity_check=ok`、数据量不变；节点 4/5/6/2 全部重连 |
+| 00:59 | 后端镜像 `sha256:5e83ee24…`（get_port 空入口节点守卫 + Hikari idle-timeout） | `Up (healthy)`、`Restarts=0`、`oom=false`；`v4=200 v6=200 front=200`；`integrity_check=ok`、数据量不变；节点 5/6/2/4 全部重连；Hikari `idleTimeout is close to or more` 告警计数 **0**；`"secret":"9e8b****cd88"` |
+| 01:06:30 | 本机 agent（socket 层 URL 脱敏） | `MainPID=207748`、`NRestarts=0`、`VmRSS 51,068 kB`、`Threads 13`；明文 secret **0** |
+| 01:09:52 | 本机 agent（+ 上报失败错误脱敏） | `MainPID=208156`、`NRestarts=0`、`VmRSS 50,736 kB`、`Threads 12`；明文 secret **0**；`services 166 / chains 1`、`estab 13`、`fds 183`；`v4=200 v6=200` |
 
-**备份位置**：`/root/agent_backup_20261109-230427/`（`flux_agent.bak` / `gost.json.bak` / `config.json.bak`）、`/root/docker-compose.yml.bak-20261109-233154`、`/root/docker-compose.yml.bak-20261110-002444`、`/root/docker-compose.yml.bak-20261110-004652`。
+**备份位置**：`/root/agent_backup_20261109-230427/`（`flux_agent.bak` / `gost.json.bak` / `config.json.bak`）、`/root/agent_backup_20261110-010630/`、`/root/agent_backup_20261110-010952/`、`/root/docker-compose.yml.bak-20261109-233154`、`/root/docker-compose.yml.bak-20261110-002444`、`/root/docker-compose.yml.bak-20261110-004652`、`/root/docker-compose.yml.bak-20261110-005912`。
 
 ---
 
@@ -180,7 +204,7 @@
 ```bash
 # 本地
 cd /root/v2.0.7-beta
-git log --oneline -8            # 64e1bc9 / d2e38b9 / 059af4c / 952fa02 / 859225a / d7e63e8 / d843617 / 7473a73
+git log --oneline -12           # 7d1e603 / e4d6ecb / be67a16 / b29282d / d2e38b9 / 64e1bc9 / b05293e / 059af4c / 952fa02 / 859225a / d7e63e8 / d843617
 git status --short               # 应为空
 
 # 生产只读体检
