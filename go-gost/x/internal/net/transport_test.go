@@ -137,14 +137,21 @@ func TestTransportContextCopiesData(t *testing.T) {
 }
 
 // TestTransportContextPropagatesError 验证非 EOF 错误会向上抛出。
+//
+// 注意：两个 copy goroutine 谁先返回是不确定的（修复前后都是如此），
+// 因此这里让两端都返回非 EOF 错误，避免测试本身引入竞态。
+// 「EOF 不算错误」由 TestTransportContextCopiesData 覆盖。
 func TestTransportContextPropagatesError(t *testing.T) {
 	boom := errors.New("boom")
 	rw1 := &errReadWriter{readErr: boom}
-	rw2 := &errReadWriter{readErr: io.EOF}
+	rw2 := &errReadWriter{readErr: boom}
 
 	err := TransportContext(context.Background(), rw1, rw2)
 	if err == nil {
 		t.Fatal("期望返回错误，实际为 nil")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("期望返回 boom，实际 %v", err)
 	}
 }
 
