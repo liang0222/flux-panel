@@ -218,6 +218,10 @@ secrets.json
 go-gost/config.json
 go-gost/gost.json
 
+# go build 在包目录直接产出的可执行文件（46MB，不应入库）
+go-gost/gost
+go-gost/gost.exe
+
 # ==========================================
 # 备份和临时文件
 # ==========================================
