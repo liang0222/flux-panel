@@ -218,7 +218,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	}
 	defer cc.Close()
 
-	xnet.Transport(conn, cc)
+	xnet.TransportContext(ctx, conn, cc)
 
 	return nil
 }

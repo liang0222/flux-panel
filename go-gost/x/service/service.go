@@ -186,7 +186,6 @@ func (s *defaultService) Serve() error {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	if s.status.Stats() != nil {
 		go s.observeStats(ctx)
@@ -200,7 +199,21 @@ func (s *defaultService) Serve() error {
 	}
 
 	var wg sync.WaitGroup
-	defer wg.Wait()
+
+	// 退出顺序很关键：必须先 cancel 再 wg.Wait。
+	//
+	// 原写法 `defer cancel()` 在前、`defer wg.Wait()` 在后，Go 的 defer 后进先出，
+	// 实际执行顺序是 wg.Wait() → cancel()。旧版 net.Transport 完全不看 ctx，两个
+	// copy goroutine 阻塞在 socket 读写上，所以 wg.Wait() 会一直等到连接自然结束
+	// （对端断开或 TCP keepalive 超时，默认 10 分钟以上）；cancel 排在它后面，
+	// 等于白等——这就是「端口删了、监听没了，旧连接还在转发真实流量」的成因。
+	//
+	// 现在把 cancel 提到 wg.Wait() 之前，Close() 关掉 listener 后 ctx 立即取消，
+	// 连接侧通过 net.TransportContext 感知取消并主动关闭两端，wg 随之归零。
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
 
 	var tempDelay time.Duration
 	for {
