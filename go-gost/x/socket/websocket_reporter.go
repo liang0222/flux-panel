@@ -1045,7 +1045,9 @@ func StartWebSocketReporterWithConfig(addr string, secret string, http int, tls 
 	// 构建初始 WebSocket URL
 	fullURL := "ws://" + addr + "/system-info?type=1&secret=" + secret + "&version=" + version + "&http=" + strconv.Itoa(http) + "&tls=" + strconv.Itoa(tls) + "&socks=" + strconv.Itoa(socks)
 
-	fmt.Printf("🔗 WebSocket连接URL: %s\n", fullURL)
+	// secret 是节点身份凭据，等价于登录口令，不能明文写进日志（journald 会长期留存）。
+	// 这里只打印脱敏后的 URL，保留排障所需的地址与参数。
+	fmt.Printf("🔗 WebSocket连接URL: %s\n", maskSecretInURL(fullURL))
 
 	reporter := NewWebSocketReporter(fullURL, secret)
 	// 保存 addr, secret, version 供重连时使用
@@ -1254,4 +1256,23 @@ func (w *WebSocketReporter) processDurationInData(data interface{}) interface{} 
 	default:
 		return v
 	}
+}
+
+// maskSecretInURL 把 URL 查询串里的 secret 参数值替换为掩码，
+// 用于日志输出。保留首尾各 4 位，便于比对是哪一份配置。
+func maskSecretInURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(URL 解析失败)"
+	}
+	q := u.Query()
+	if v := q.Get("secret"); v != "" {
+		if len(v) <= 8 {
+			q.Set("secret", "****")
+		} else {
+			q.Set("secret", v[:4]+"****"+v[len(v)-4:])
+		}
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }
