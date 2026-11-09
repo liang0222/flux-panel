@@ -256,7 +256,9 @@ export default function AdminLayout({
       {/* 移动端遮罩层 */}
       {isMobile && mobileMenuVisible && (
         <div 
+          aria-hidden="true"
           className="fixed inset-0 backdrop-blur-sm bg-white/50 dark:bg-black/30 z-40"
+          role="presentation"
           onClick={hideMobileMenu}
         />
       )}

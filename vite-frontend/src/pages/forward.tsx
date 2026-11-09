@@ -1163,11 +1163,10 @@ export default function ForwardPage() {
 
   // 可拖拽的转发卡片组件
   const SortableForwardCard = ({ forward }: { forward: Forward }) => {
-    // 确保 forward 对象有效
-    if (!forward || !forward.id) {
-      return null;
-    }
-
+    // 修复：原实现把 `if (!forward || !forward.id) return null;` 写在 useSortable 之前，
+    // 属于条件调用 Hook。同一组件在数据从"无效"变为"有效"时，本次渲染会比上次多出
+    // 一个 Hook，React 会抛 "Rendered more hooks than during the previous render"。
+    // 这里改为先无条件调用 Hook，再用提前 return 控制渲染结果。
     const {
       attributes,
       listeners,
@@ -1175,7 +1174,12 @@ export default function ForwardPage() {
       transform,
       transition,
       isDragging,
-    } = useSortable({ id: forward.id });
+    } = useSortable({ id: forward?.id ?? -1 });
+
+    // 确保 forward 对象有效
+    if (!forward || !forward.id) {
+      return null;
+    }
 
     const style = {
       transform: transform ? CSS.Transform.toString(transform) : undefined,
@@ -1246,7 +1250,15 @@ export default function ForwardPage() {
                 className={`cursor-pointer px-2 py-1 bg-default-50 dark:bg-default-100/50 rounded border border-default-200 dark:border-default-300 transition-colors duration-200 ${
                   hasMultipleAddresses(forward.inIp) ? 'hover:bg-default-100 dark:hover:bg-default-200/50' : ''
                 }`}
+                role="button"
+                tabIndex={0}
                 onClick={() => showAddressModal(forward.inIp, forward.inPort, '入口端口')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    showAddressModal(forward.inIp, forward.inPort, '入口端口');
+                  }
+                }}
                 title={formatInAddress(forward.inIp, forward.inPort)}
               >
                 <div className="flex items-center justify-between">
@@ -1268,7 +1280,15 @@ export default function ForwardPage() {
                 className={`cursor-pointer px-2 py-1 bg-default-50 dark:bg-default-100/50 rounded border border-default-200 dark:border-default-300 transition-colors duration-200 ${
                   hasMultipleAddresses(forward.remoteAddr) ? 'hover:bg-default-100 dark:hover:bg-default-200/50' : ''
                 }`}
+                role="button"
+                tabIndex={0}
                 onClick={() => showAddressModal(forward.remoteAddr, null, '目标地址')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    showAddressModal(forward.remoteAddr, null, '目标地址');
+                  }
+                }}
                 title={formatRemoteAddress(forward.remoteAddr)}
               >
                 <div className="flex items-center justify-between">
@@ -1701,7 +1721,7 @@ export default function ForwardPage() {
                 </ModalHeader>
                 <ModalBody>
                   <p className="text-default-600">
-                    确定要删除转发 <span className="font-semibold text-foreground">"{forwardToDelete?.name}"</span> 吗？
+                    确定要删除转发 <span className="font-semibold text-foreground">&quot;{forwardToDelete?.name}&quot;</span> 吗？
                   </p>
                   <p className="text-small text-default-500 mt-2">
                     此操作无法撤销，删除后该转发将永久消失。

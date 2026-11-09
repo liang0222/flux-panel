@@ -1037,7 +1037,7 @@ export default function TunnelPage() {
 
                         {getChainGroups().length === 0 && (
                           <div className="text-center py-8 bg-default-50 dark:bg-default-100/50 rounded border border-dashed border-default-300">
-                            <p className="text-sm text-default-500">还没有添加转发链，点击上方"添加一跳"按钮开始添加</p>
+                            <p className="text-sm text-default-500">还没有添加转发链，点击上方&quot;添加一跳&quot;按钮开始添加</p>
                           </div>
                         )}
                       </>
@@ -1245,7 +1245,7 @@ export default function TunnelPage() {
                   <h2 className="text-xl font-bold">确认删除</h2>
                 </ModalHeader>
                 <ModalBody>
-                  <p>确定要删除隧道 <strong>"{tunnelToDelete?.name}"</strong> 吗？</p>
+                  <p>确定要删除隧道 <strong>&quot;{tunnelToDelete?.name}&quot;</strong> 吗？</p>
                   <p className="text-small text-default-500">此操作不可恢复，请谨慎操作。</p>
                 </ModalBody>
                 <ModalFooter>
