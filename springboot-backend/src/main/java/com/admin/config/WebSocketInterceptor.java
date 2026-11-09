@@ -42,7 +42,8 @@ public class WebSocketInterceptor extends HttpSessionHandshakeInterceptor {
         String tls = serverHttpRequest.getServletRequest().getParameter("tls");
         String socks = serverHttpRequest.getServletRequest().getParameter("socks");
         if (Objects.equals(type, "1")) {
-            System.out.println("type: " + type + " - version: " + version + " - secret: " + secret + " - IP: " + getClientIp(request));
+            // 不打印 secret 明文：secret 等同节点凭据，写入 stdout 会进入容器日志与 journald。
+            log.info("节点握手请求 type: {} - version: {} - IP: {}", type, version, getClientIp(request));
             Node node = nodeService.getOne(new QueryWrapper<Node>().eq("secret", secret));
             if (node == null) {
                 log.info("节点验证失败：未找到匹配的secret");

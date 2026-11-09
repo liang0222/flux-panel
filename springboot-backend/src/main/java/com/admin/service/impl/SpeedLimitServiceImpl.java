@@ -12,6 +12,7 @@ import com.alibaba.fastjson.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
@@ -35,6 +36,7 @@ import java.util.UUID;
  * @author QAQ
  * @since 2025-06-04
  */
+@Slf4j
 @Service
 public class SpeedLimitServiceImpl extends ServiceImpl<SpeedLimitMapper, SpeedLimit> implements SpeedLimitService {
 
@@ -80,7 +82,7 @@ public class SpeedLimitServiceImpl extends ServiceImpl<SpeedLimitMapper, SpeedLi
                     this.removeById(speedLimit.getId());
                     for (Long node_id : limit_success) {
                         GostDto deleteLimiters = GostUtil.DeleteLimiters(node_id, speedLimit.getId());
-                        System.out.println(deleteLimiters);
+                        log.warn("回滚限速器失败: {}", deleteLimiters);
                     }
                     return R.err(gostDto.getMsg());
                 }

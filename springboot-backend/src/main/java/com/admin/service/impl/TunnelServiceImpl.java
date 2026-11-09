@@ -16,6 +16,7 @@ import com.alibaba.fastjson.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
@@ -29,6 +30,7 @@ import java.util.stream.Collectors;
  * @author QAQ
  * @since 2025-06-03
  */
+@Slf4j
 @Service
 public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> implements TunnelService {
 
@@ -158,7 +160,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                         chainTunnelService.remove(new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnel.getId()));
                         for (JSONObject chainSuccess : chain_success) {
                             GostDto deleteChains = GostUtil.DeleteChains(chainSuccess.getLong("node_id"), chainSuccess.getString("name"));
-                            System.out.println(deleteChains);
+                            log.warn("回滚转发链失败: {}", deleteChains);
                         }
                         return R.err(gostDto.getMsg());
                     }
@@ -182,7 +184,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                             chainTunnelService.remove(new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnel.getId()));
                             for (JSONObject chainSuccess : chain_success) {
                                 GostDto deleteChains = GostUtil.DeleteChains(chainSuccess.getLong("node_id"), chainSuccess.getString("name"));
-                                System.out.println(deleteChains);
+                                log.warn("回滚转发链失败: {}", deleteChains);
                             }
                             return R.err(gostDto.getMsg());
                         }
@@ -198,7 +200,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                             chainTunnelService.remove(new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnel.getId()));
                             for (JSONObject chainSuccess : chain_success) {
                                 GostDto deleteChains = GostUtil.DeleteChains(chainSuccess.getLong("node_id"), chainSuccess.getString("name"));
-                                System.out.println(deleteChains);
+                                log.warn("回滚转发链失败: {}", deleteChains);
                             }
                             return R.err(gostDto.getMsg());
                         }
@@ -217,7 +219,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                             JSONArray jsonArray = new JSONArray();
                             jsonArray.add(serviceSuccess.getString("name"));
                             GostDto deleteService = GostUtil.DeleteService(serviceSuccess.getLong("node_id"), jsonArray);
-                            System.out.println(deleteService);
+                            log.warn("回滚服务失败: {}", deleteService);
                         }
                         return R.err(gostDto.getMsg());
                     }
@@ -240,7 +242,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                         JSONArray jsonArray = new JSONArray();
                         jsonArray.add(serviceSuccess.getString("name"));
                         GostDto deleteService = GostUtil.DeleteService(serviceSuccess.getLong("node_id"), jsonArray);
-                        System.out.println(deleteService);
+                        log.warn("回滚服务失败: {}", deleteService);
                     }
                     return R.err(gostDto.getMsg());
                 }

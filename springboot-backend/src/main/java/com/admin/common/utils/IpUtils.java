@@ -1,9 +1,12 @@
 package com.admin.common.utils;
 
+import lombok.extern.slf4j.Slf4j;
+
 import javax.servlet.http.HttpServletRequest;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 
+@Slf4j
 public class IpUtils {
 
     public static String getIpAddr(HttpServletRequest request) {
@@ -20,13 +23,13 @@ public class IpUtils {
                 ipAddress = request.getRemoteAddr();
                 if (ipAddress.equals("127.0.0.1")) {
                     // 根据网卡取本机配置的IP
-                    InetAddress inet = null;
                     try {
-                        inet = InetAddress.getLocalHost();
+                        InetAddress inet = InetAddress.getLocalHost();
+                        ipAddress = inet.getHostAddress();
                     } catch (UnknownHostException e) {
-                        e.printStackTrace();
+                        // 取不到本机地址时保留 127.0.0.1，避免空指针（原实现会 NPE）
+                        log.warn("获取本机 IP 失败，保留原始地址: {}", e.getMessage());
                     }
-                    ipAddress = inet.getHostAddress();
                 }
             }
             // 对于通过多个代理的情况，第一个IP为客户端真实IP,多个IP按照','分割

@@ -74,7 +74,7 @@ class GostUtilChainConfigTest {
         JSONObject selector = hop.getJSONObject("selector");
         assertEquals("round", selector.getString("strategy"));
         assertEquals(1, selector.getIntValue("maxFails"));
-        assertEquals(600000000000L, selector.getLongValue("failTimeout"));
+        assertEquals(30000000000L, selector.getLongValue("failTimeout"));
 
         JSONObject chainNode = hop.getJSONArray("nodes").getJSONObject(0);
         assertEquals("[2400:54a0:20c0:300:7::a]:1000", chainNode.getString("addr"));

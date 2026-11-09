@@ -117,7 +117,10 @@ public class GostUtil {
         JSONObject selector = new JSONObject();
         selector.put("strategy", chainTunnels.getFirst().getStrategy());
         selector.put("maxFails", 1);
-        selector.put("failTimeout", 600000000000L); // 600 秒（纳秒单位）
+        // 中转节点失败后的冷却时间。原值 600 秒（10 分钟）意味着某个出口节点抖动一次，
+        // 该节点会在 10 分钟内被 selector 完全排除；配合多节点 failover 时切换/回切都过慢。
+        // 30 秒足以覆盖单次拨号超时（dialer 默认 5 秒）并让故障节点尽快恢复参与轮询。
+        selector.put("failTimeout", 30000000000L); // 30 秒（纳秒单位）
 
         hop.put("selector", selector);
         hop.put("nodes", nodes);
