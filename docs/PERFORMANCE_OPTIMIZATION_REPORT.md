@@ -907,3 +907,57 @@ for (ConfigItem service : configItems) {          // 生产单节点约 166 项
 ### 21.6 效果评估的诚实边界
 
 这条改动**不改变内存**，也不改变任何接口行为。它的收益是「每 10 分钟少约 800 次数据库往返」，在当前负载下对 CPU 与延迟的影响**低于可测量阈值**——没有做压测对比，因为无法在合理实验设计下从噪声中分辨出 800 次微秒级主键查询的差异。收益定性为「消除了确定存在的浪费」，而非「实测提速多少」。
+
+---
+
+## 21. 第十五轮：`@Async` 线程池上界
+
+### 21.1 优化动机
+
+Spring Boot 自动配置的 `applicationTaskExecutor` 默认 `max-size = Integer.MAX_VALUE`、`queue-capacity = Integer.MAX_VALUE`。队列无界在「生产者偶尔快于消费者」时不会报错、不会拒绝、不会降级 —— 它只是默默地把任务对象留在 `LinkedBlockingQueue` 里。
+
+本项目的任务体是 `cleanNodeConfigs(String nodeId, GostConfigDto gostConfig)`，`GostConfigDto` 里装着该节点全部 service / chain / limiter 的配置快照。生产 `/etc/flux_agent/gost.json` 有 166 个 service，一次上报的心跳体量虽小，但结构完整；如果节点侧进入异常重连循环（本项目历史上出现过 `WebSocket` 每几秒重连一次的情况），发起速率就会从「每 10 分钟一次」升到「每几秒一次」，而清理逻辑里每个孤立项删除都要走一次 `GostUtil` 的 WebSocket 往返 —— 消费速率一旦掉到秒级以下，队列就会累积。
+
+### 21.2 技术原理
+
+`ThreadPoolExecutor` 的扩容规则：
+
+1. 运行线程数 < `corePoolSize` → 新建线程，**不看队列**；
+2. 运行线程数 ≥ `corePoolSize` → 入队；
+3. 队列满且运行线程数 < `maxPoolSize` → 新建线程；
+4. 队列满且已到 `maxPoolSize` → 执行拒绝策略（默认 `AbortPolicy`，抛 `RejectedExecutionException`）。
+
+所以 `queue-capacity` 是**是否触发扩容与拒绝的分水岭**。把它设为 `Integer.MAX_VALUE`（Boot 默认）等价于「第 2 步永远进得去，第 3、4 步永远走不到」—— `maxPoolSize` 再大也没有意义，线程数固定在 `corePoolSize`，多出来的任务全进队列。这也是很多项目「配了 maxPoolSize 但没见线程涨」的原因。
+
+本轮把它改成 `core-size=2 / max-size=4 / queue-capacity=100`，三条边界同时成立：
+
+| 边界 | 值 | 达成后行为 |
+|---|---|---|
+| 常驻线程 | 2 | 空闲时不占线程栈（每线程默认 1 MB 虚拟、常驻 RSS 约 8–64 KB） |
+| 峰值线程 | 4 | 队列满才扩容，最多多 2 个 |
+| 队列上限 | 100 | 满了抛 `RejectedExecutionException`，异常进日志 |
+| 空闲回收 | 60s | 超出常驻的部分 1 分钟后退出 |
+
+### 21.3 为什么不选更大的值
+
+- `core-size` 取 8（Boot 默认）：本项目同时上报配置的节点最多 5 个，8 个常驻线程中有 3 个永久空闲。线程本身占的是**栈预留 + 内核 task_struct**，不是零成本。
+- `max-size` 取 `Integer.MAX_VALUE`：见 21.2，只要队列无界，max 值永远不会被用到。
+- `queue-capacity` 取 0（`SynchronousQueue`）：会让突发上报直接抛拒绝异常，丢的是清理任务 —— 孤立配置不清会留在节点上继续跑，代价比多占几十 MB 内存更大。
+- `queue-capacity` 取 1000：单个 `GostConfigDto` 按 166 个 service 估算序列化后约 40–80 KB，1000 个就是 40–80 MB，正是本轮要避免的量级。
+
+### 21.4 边界与代价
+
+- **不改变任何业务结果**：`@Async` 方法签名、异常处理、调用方全部未动；队列未满时行为与默认配置完全一致。
+- **拒绝只发生在异常场景**：正常上报 10 分钟一次，100 容量意味着需要积压 16 小时以上才可能打满。打满时拒绝的是「清理孤立项」这件本可以延后的事，不影响流量统计与转发。
+- **线程名加了 `flux-async-` 前缀**：这是为了可观测性 —— 出问题时 `jstack` 里能立刻区分哪些线程是本项目的异步池。
+
+### 21.5 验证
+
+- 单测断言配置绑定与代理生效（见 `AsyncExecutorConfigTest` / `AsyncProxyCheckTest`）。**这一点很关键**：Spring Boot 对无法识别的 `spring.task.execution.*` 键是静默忽略的，写错一个字母不会有任何报错，只会悄悄用回默认值。
+- 生产线程转储确认 `flux-async-*` 线程存在且阻塞在 `LinkedBlockingQueue.poll` —— 证明用的是这个池，不是别的执行器。
+- 两分钟连续采样：线程数在 0/1 之间跳动、编号递增、**不累积**。
+
+### 21.6 未验证
+
+- 未做「队列打满会拒绝」的压测：需要构造 100 个并发 `POST /flow/config`，会污染生产数据，未执行。
+- 未观测长时间（24 小时）的线程数趋势：当前只采了两分钟。

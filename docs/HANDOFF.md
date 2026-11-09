@@ -8,8 +8,7 @@
 
 ## 一句话现状
 
-**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端八批缺陷修复 + 前后端双份日志脱敏 + 前端 24 个 lint error 全部修复并上线；Java 堆外内存定性完成并使 `docker stats` 从 343 MiB 降到约 210–230 MiB；journald 上限已安装；九份交付文档已同步。**
-剩余：`failTimeout` 新值尚未下发到节点（需先配多节点才有意义）、其他节点 agent 仍是旧二进制、node 5 假在线、node 3 整机离线。
+后端十三批缺陷/性能修复 + Go agent 连接生命周期与日志脱敏 + 前端 24 个 lint error + Java 堆外内存两轮压缩（glibc arena 上限、TrimNativeHeapInterval）全部已上线生产，`restarts=0`、`oom=false`、`v4/v6/front` 全 200。当前 Java RSS 约 230–270 MB（原 373 MB），agent RSS 约 50 MB（原 110–123 MB）。
 
 ---
 
@@ -18,7 +17,7 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `/root/v2.0.7-beta` |
-| 当前分支 | `fix/transport-ctx-cancel`（HEAD `124a96e`，已与 `feat/port-traffic-ranking` fast-forward 同步） |
+| 当前分支 | `fix/transport-ctx-cancel`（HEAD `f13f805`，已与 `feat/port-traffic-ranking` fast-forward 同步） |
 | GitHub | `https://github.com/liang0222/flux-panel`，账号 `liang0222` |
 | GitHub token | 用户已在会话中提供（形如 `ghp_...`）；`gh` 需 `GH_TOKEN=` 前缀，或写进 push URL。**不要把 token 写进仓库文件——GitHub push protection 会拦截** |
 | Docker Hub | 账号 `ahmadplayz721`；token 形如 `dckr_pat_...`，由用户提供，**不入库** |
@@ -204,6 +203,16 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 1. **Dockerfile 的 `ENV JAVA_OPTS` 被声明两次**：Docker 对同名 `ENV` 是覆盖不是追加，第一行（不含 Trim）被第二行完全盖掉，功能无影响但极易误判。已删掉重复行并注明「唯一一处、必须包含全部参数」。
 2. **节点安装命令指向分支而非 tag**：`NodeServiceImpl.getInstallCommand()` 原拼 `refs/heads/feat/port-traffic-ranking/install.sh`，分支漂移会让用户在面板里拿到未发布脚本。改为 `refs/tags/2.0.7-beta-perf/install.sh`，与 `panel_install.sh` 拉 compose 的口径统一。
 
+### 2.14 `@Async` 线程池上界（提交 `e09ff19`、`f13f805`）
+
+`@Async` 全仓只有一处（`CheckGostConfigAsync.cleanNodeConfigs`），没有自定义执行器，用的是 Boot 默认 `applicationTaskExecutor`：`max-size=Integer.MAX_VALUE`、`queue-capacity=Integer.MAX_VALUE`。**队列无界**意味着清理卡住时任务会无限堆积（每个任务持整个 `GostConfigDto`），且不报错、不打日志。
+
+`application.yml` 加了 `spring.task.execution`：`core-size 2 / max-size 4 / queue-capacity 100 / keep-alive 60s / thread-name-prefix flux-async-`。100 容量对应「10 分钟一次 × 5 节点」，打满才拒绝，阻塞时异常进日志而不是静默占内存。
+
+新增两个 `@SpringBootTest`：`AsyncExecutorConfigTest`（断言四个参数真的绑上了——Boot 对拼错的 `spring.task.*` 键是**静默忽略**的）、`AsyncProxyCheckTest`（断言 bean 被 CGLIB 代理，否则 `@Async` 静默退化成同步执行）。全量 `mvn test` **114 例全过**。
+
+生产验证：`kill -3` 转储里出现 `flux-async-4/5/6`，栈停在 `LinkedBlockingQueue.poll` → 池确实在用。两分钟连续采样线程数在 0/1 间跳动、编号递增、**不累积**（`keep-alive 60s` 正常回收）。
+
 ## 3. 待完成
 
 ### P0 — 需要决策/授权
@@ -228,12 +237,12 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 
 7. ~~八份交付文档未同步本轮改动~~ —— **已完成**（提交 `952fa02`）。七份文档已补入第六轮内容：`MEMORY_AUDIT_REPORT.md` §10、`MEMORY_ROOT_CAUSE_ANALYSIS.md` §16、`PERFORMANCE_OPTIMIZATION_REPORT.md` §18、`PERFORMANCE_COMPARISON.md` 第九轮、`DEPLOYMENT_GUIDE.md` §8、`SERVER_MONITORING_GUIDE.md` §12、`ROLLBACK_GUIDE.md` §11。九份文档合计 6,799 行。
 
-7.1 **`install.sh` 的 `MEM_LIMIT` 缺省值与生产不一致**（未改，需决策）：
+7.1 ~~`install.sh` 的 `MEM_LIMIT` 缺省值与生产不一致~~ —— **已修复**（提交 `5da3070`）：`MEM_LIMIT` 缺省改 `512MiB`，`go-gost/main.go` 的内置缺省同步改 `512MiB`，`ensure_service_memory_limit()` 现在认识 drop-in 目录并只改 `*.conf`。以下为原始记录：
    - `install.sh:51` 是 `MEM_LIMIT="${FLUX_AGENT_MEMLIMIT:-1200MiB}"`，而生产实际生效的是 drop-in `/etc/systemd/system/flux_agent.service.d/override.conf` 里的 `GOMEMLIMIT=512MiB`。
    - `ensure_service_memory_limit()`（`install.sh:332`）只改写 `flux_agent.service` 本体里的 `Environment="GOMEMLIMIT=` 行，**不认识 drop-in** → 在节点上重跑安装/更新会往本体写 1200MiB，与 drop-in 的 512MiB 并存（systemd 中 drop-in 优先，实际仍 512MiB，但两处数值矛盾，排查时极易误判）。
    - 改它会改变**所有节点**的安装行为，需用户决策。
 
-7.2 **两个安装脚本从 `feat` 分支而非 tag 拉 compose**（未改，需决策）：
+7.2 ~~两个安装脚本从 `feat` 分支而非 tag 拉 compose~~ —— **已修复**（提交 `5da3070`、`fc45e60`）：`panel_install.sh` 与 `NodeServiceImpl.getInstallCommand()` 均改指 `refs/tags/2.0.7-beta-perf`。以下为原始记录：
    - `panel_install.sh:11-12` 的 `DOCKER_COMPOSEV4_URL` / `DOCKER_COMPOSEV6_URL` 指向 `refs/heads/feat/port-traffic-ranking`。
    - 升级时可能拉到未发布的 compose 配置。改它会影响所有新装与升级流程。
 
@@ -270,7 +279,7 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 ```bash
 # 本地
 cd /root/v2.0.7-beta
-git log --oneline -14           # 851aedc / abb5cec / a2b97b5 / 97f17c6 / 74d1d33 / fd911c7 / 5da3070 / 156bfc9 / 264a035 / 656c897 / 7d1e603 / e4d6ecb / be67a16 / b29282d
+git log --oneline -16           # 851aedc / abb5cec / a2b97b5 / 97f17c6 / 74d1d33 / fd911c7 / 5da3070 / 156bfc9 / 264a035 / 656c897 / 7d1e603 / e4d6ecb / be67a16 / b29282d
 git status --short               # 应为空
 
 # 生产只读体检

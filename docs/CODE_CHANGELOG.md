@@ -1282,3 +1282,74 @@ https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traf
 `README.md:47/56` 的两条命令仍指向分支（面向开发者，保持分支语义，未改）。
 
 验证：`mvn test` 112 例全过；解包 jar 后 `NodeServiceImpl.class` 含 `refs/tags/2.0.7-beta-perf`。
+
+---
+
+## 24. 第十五轮：`@Async` 线程池上界与代理生效（2026-11-10）
+
+### 24.1 问题
+
+全仓库只有一处 `@Async` —— `springboot-backend/src/main/java/com/admin/common/task/CheckGostConfigAsync.java` 的 `cleanNodeConfigs`，由 `FlowController` 的 `POST /flow/config` 调用。项目没有自定义 `ThreadPoolTaskExecutor`，也没有 `AsyncConfigurer` 实现，因此用的是 Spring Boot 自动配置的 `applicationTaskExecutor`：
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `core-size` | 8 | 常驻线程 |
+| `max-size` | `Integer.MAX_VALUE` | 无上界 |
+| `queue-capacity` | `Integer.MAX_VALUE` | **队列无界** |
+
+队列无界意味着：只要任务提交速率持续高于消费速率（例如某个节点反复上报超大 `GostConfigDto`、或清理逻辑里 `GostUtil` 的 WebSocket 调用变慢），任务就会无限堆积在 `LinkedBlockingQueue` 里，每个任务持有整个 `GostConfigDto`（含全部 service / chain / limiter 配置）。这类堆积不会抛异常、不会拒绝、也不会打日志，只表现为 RSS 缓慢上涨 —— 正是「内存看起来在漏但堆分析找不到泄漏点」的典型形态。
+
+### 24.2 修改
+
+`springboot-backend/src/main/resources/application.yml`（CRLF 行尾）在 `spring:` 下、`datasource:` 之前插入：
+
+```yaml
+  task:
+    execution:
+      pool:
+        core-size: 2
+        max-size: 4
+        queue-capacity: 100
+        keep-alive: 60s
+      thread-name-prefix: flux-async-
+```
+
+取值依据：实际并发只有「同时有节点上报配置」这一种场景，节点数 5，2 个常驻线程足够；`max-size: 4` 留一倍余量；`queue-capacity: 100` 远大于任何真实突发量，一旦打满说明清理链路上有阻塞，`RejectedExecutionException` 会带着堆栈进日志，比静默堆积更容易定位。
+
+`thread-name-prefix: flux-async-` 是为了能在 `jstack` / `/proc/<pid>/task/*/comm` 里直接看出这些线程属于谁 —— 默认前缀是 `task-`，和 `pool-1-thread-1` 之类的框架线程混在一起无法区分。
+
+### 24.3 测试
+
+新增两个 `@SpringBootTest`：
+
+- `springboot-backend/src/test/java/com/admin/config/AsyncExecutorConfigTest.java`：断言 `applicationTaskExecutor` 的 `corePoolSize == 2`、`maxPoolSize == 4`、队列容量 `== 100`、`threadNamePrefix == "flux-async-"`。作用是防止「改了 YAML 但属性名写错、Boot 静默忽略」。
+- `springboot-backend/src/test/java/com/admin/config/AsyncProxyCheckTest.java`：断言 `CheckGostConfigAsync` 被 CGLIB 代理（`AopUtils.isAopProxy`）。`@Async` 依赖代理生效，如果哪天有人把这个类改成 `final`、或把调用改成 `new`、或在同类内部自调用，注解会静默失效而任务退化成同步执行 —— 线程池配了也看不出任何异常，只有响应时间变长。
+
+全量 `mvn test`：**Tests run: 114, Failures: 0, Errors: 0**。
+
+### 24.4 验证：线程池确实在被使用
+
+上线后在容器内 `kill -3` 取线程转储，`/proc/<pid>/task/*/comm` 里出现了 `flux-async-4` / `flux-async-5` / `flux-async-6`，转储中对应条目为：
+
+```
+"flux-async-4" #62 [262] prio=5 os_prio=0 cpu=8.28ms elapsed=12.47s ...
+   java.lang.Thread.State: TIMED_WAITING (parking)
+	at java.util.concurrent.LinkedBlockingQueue.poll(...)
+	at java.util.concurrent.ThreadPoolExecutor.getTask(...)
+```
+
+`LinkedBlockingQueue.poll` 说明它们正从任务队列里取任务 —— **`@Async` 代理生效、走的就是这个线程池**，不是之前怀疑的「注解没生效、任务在请求线程同步跑」。
+
+补充观测（15 秒一次、连续两分钟）：`flux-async-*` 线程数在 `0` 与 `1` 之间跳动，线程编号持续递增（4 → 5 → 6）。这是 `keep-alive: 60s` 下空闲线程被回收、下次来任务再新建的正常表现；任务本身在 1 秒内跑完，所以绝大多数采样点看到的是 0。**线程数不会随时间累积**，符合预期。
+
+### 24.5 部署
+
+- 提交：`e09ff19 perf(backend): 给 @Async 线程池显式上界，避免默认无界队列在异常时无限堆积`、`f13f805 test(backend): 锁定 @Async 线程池上界与代理生效`。
+- 镜像：manifest list `sha256:95c0624cce9e40db94eaa956ffd807073d652a6fc055d17674d2f4768e0d30a6`。
+- 上线：2026-11-10 04:17（备份 `/root/docker-compose.yml.bak-20261110-041716`），`health=healthy`、`restarts=0`、`oom=false`、`v4=200`、`v6=200`、`front=200`。
+- 内存：上线后 `VmRSS` 232–270 MB 区间波动（`-XX:TrimNativeHeapInterval=15000` 的回收周期导致），`VmHWM 305,316 kB`（上线前 332,924 kB），`Threads 47–49`。
+
+### 24.6 未做
+
+- 没有改 `@Async` 的业务语义（仍是 `void`、仍不返回 `Future`、异常仍由 Spring 的 `SimpleAsyncUncaughtExceptionHandler` 记日志），因此调用方看不出任何区别。
+- 没有把 `queue-capacity` 设为 0（`SynchronousQueue`）—— 那会让突发上报直接抛 `RejectedExecutionException`，反而丢清理任务。
