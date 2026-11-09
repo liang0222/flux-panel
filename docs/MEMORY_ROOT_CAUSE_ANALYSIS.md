@@ -1275,3 +1275,76 @@ WAL 有积压」时无法完成，会按 `busy_timeout` 反复重试，**期间�
 |---|---|---|
 | §11 / §12 关于 goroutine 固定基数 | 「约 424（212 service + 106 TCP + 106 UDP）」 | 实测截距 **675**；监听端口已增至 126 TCP + 126 UDP，且还有其它常驻 goroutine。以实测为准 |
 | §12.1 对 Java RSS 的解释 | 「约 184 MB 是已提交未使用却占物理内存」 | 该说法方向正确但数字不严谨。实测：提交约 160 MB，RSS 368 MB，差值是 THP 放大（72% 为大页） |
+
+---
+
+## 16. 第六轮：内存之外的第二条根因链——连接生命周期（2026-11-09）
+
+前十五节都在回答「内存为什么高」。这一节回答另一个问题：**为什么删掉的东西还在占资源**。
+
+### 16.1 用户报障
+
+> 「我隧道删除了 还是会运行的旧隧道 新旧一起运行 太乱了」
+
+### 16.2 逐层排除
+
+| 假设 | 检验 | 结论 |
+|---|---|---|
+| 隧道没删干净，DB 有残留 | `tunnel` 表只有 2 条；`forward` 193 条全部有对应 `tunnel_id` | **否证** |
+| agent 上有孤儿 service | agent 的 166 个 service 提取出的 forward id 集合与 DB `tunnel_id=7` 的 83 条**双向差集皆空** | **否证** |
+| 端口被旧 service 占用 | `*:1000` 监听对应 `gost.json` 里 `726_1_0_tcp`，属 tunnel 7 的正常转发 | **否证** |
+| 新建 chain 触发了全局重载 | `go-gost/x/socket/chain.go` 的 `createChain` 只做 registry 注册 + `config.OnUpdate` 追加，不触碰已有 service | **否证** |
+| 删除命令下发失败 | 后端日志 `DeleteServiceResponse success:true` 数十条、`DeleteChainsResponse success:true`，无失败记录 | **否证** |
+| **已建立连接未随 service 关闭** | 见 16.3 | **成立** |
+
+### 16.3 根因（两处叠加）
+
+**第一处**：`go-gost/x/internal/net/transport.go`
+
+```go
+func Transport(rw1, rw2 io.ReadWriter) error {
+    errc := make(chan error, 1)
+    go func() { errc <- CopyBuffer(rw1, rw2, bufferSize) }()
+    go func() { errc <- CopyBuffer(rw2, rw1, bufferSize) }()
+    if err := <-errc; err != nil && err != io.EOF { return err }
+    return nil
+}
+```
+
+两个 `CopyBuffer` 阻塞在 socket 读写上，**没有任何 ctx 出口**。`relayHandler.Close()` 里的 `h.cancel()` 只 cancel 了 ctx，唤不醒这两个 goroutine。
+
+**第二处**：`go-gost/x/service/service.go` 的 `Serve()`
+
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()          // ← 先声明
+var wg sync.WaitGroup
+defer wg.Wait()         // ← 后声明，LIFO 先执行
+```
+
+defer 是后进先出，所以 `wg.Wait()` 排在 `cancel()` **之前**。即使第一处修好，`Serve()` 仍会卡在 `wg.Wait()` 上等所有连接自己结束。
+
+### 16.4 生产侧的可量化后果
+
+| 证据 | 数值 |
+|---|---|
+| 切到新 chain 后旧 chain 的残留连接 | 82 条，`lastsnd > 3600s` 的占 66 条 |
+| 其中仍在传真实业务流量 | 71/82（30 秒逐连接字节增量） |
+| 旧路径总吞吐 | 64 KB/s（新路径 590 KB/s） |
+| 旧连接平均已发送 | 1,399.4 KB，总计 125.7 MB |
+| 自然清除所需时间 | `tcp_keepalive_time=600` + `tcp_retries2=15` → 10~15 分钟以上；有数据流动时 keepalive 不触发，**实际永不超时** |
+
+### 16.5 为什么之前的审计没抓到
+
+因为内存视角看它「不像问题」：Go 堆只有 3.93 MB（pprof `heap profile: 74: 3925984`），RSS 主体是 THP 放大的 arena。**连接泄漏的成本主要落在内核 socket 缓冲和 FD 上，不在 Go 堆里**，用 `pprof heap` 永远看不到。
+
+这也是本轮最值得记的方法论：**「堆没涨」不等于「资源没漏」**，要看 FD、socket 数、goroutine 按连接数的回归截距。
+
+### 16.6 修复与对照实验
+
+| 版本 | 删除 service 后持有连接 |
+|---|---|
+| 旧二进制 | `STILL ALIVE after 20s`（20 秒内持续收发成功） |
+| 新二进制 | `EOF at 3.0s`（删除发生在第 3 秒） |
+
+实验方法：`gost` 自带 REST API `DELETE /config/services/<name>`，客户端每 0.5 秒发一次心跳并读回，记录断开时刻。详见《CODE_CHANGELOG.md》§19.1。

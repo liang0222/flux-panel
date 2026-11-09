@@ -553,3 +553,88 @@ THP 放大 = AnonHugePages / RSS
 | goroutine 总数从 1000 涨到 2000 | 「泄漏」 | 看同期连接数；做回归看截距 |
 | `docker stats` 内存比 `free` 算出来的多 | 「统计错了」 | 容器含缓存、共享页、大页，口径不同，不能相加 |
 | WAL 文件一直不缩小 | 「checkpoint 失效」 | PASSIVE 模式本就不收缩，看 `log/done` 是否相等 |
+
+---
+
+## 12. 连接生命周期监控（2026-11-09 新增）
+
+前面十一节的监控都围绕「内存」。这一节补上**「删掉的东西是否真的消失了」**——它是本次事故的直接判据。
+
+### 12.1 核心指标
+
+```bash
+# 1) 已建立连接按目标 IP 分组（看是否有已弃用的 relay 还在被连）
+ss -tn state established | awk 'NR>1 {print $4}' | cut -d: -f1 | sort | uniq -c | sort -rn | head
+
+# 2) 某目标 IP 的连接数随时间变化（正常应稳定或随业务波动，不应单调堆积）
+for i in $(seq 1 10); do
+  echo "$(date +%H:%M:%S) $(ss -tn dst 136.0.197.135 | grep -c ESTAB)"
+  sleep 6
+done
+
+# 3) 这些连接是否还在传数据（关键：僵尸连接 vs 活连接）
+ss -tni dst 64.83.10.191 | grep -E 'bytes_sent|bytes_acked' | head
+
+# 4) 空闲时长分布（lastsnd 越大越可能是僵尸）
+ss -tn dst 64.83.10.191 | awk 'NR>1 {print $5}' | sort -n | uniq -c | tail
+```
+
+### 12.2 agent 侧的连接/资源
+
+```bash
+PID=$(systemctl show flux_agent -p MainPID --value)
+echo "fds: $(ls /proc/$PID/fd | wc -l)"
+echo "threads: $(grep Threads /proc/$PID/status)"
+echo "estab: $(ss -tnp state established | grep -c flux_agent)"
+curl -s 'http://127.0.0.1:6060/debug/pprof/goroutine?debug=1' | head -1   # total N
+curl -s 'http://127.0.0.1:6060/debug/pprof/heap?debug=1' | head -1        # heap profile: a: b [c: d]
+```
+
+**判读**：goroutine 数与 `estab` 做回归，**看截距**（正常约 675），不看总数。
+
+### 12.3 「删除后是否立即释放」的验收方法
+
+这是本次修复的验收标准，可随时复现：
+
+```bash
+# 1) 建一条长连接并保持（另开一个终端）
+exec 3<>/dev/tcp/127.0.0.1/<端口>
+while true; do echo ping >&3; head -c 4 <&3; sleep 1; done
+
+# 2) 在面板删除该端口对应的转发（或调 gost REST API DELETE /config/services/<name>）
+
+# 3) 观察
+ss -ltn | grep <端口>              # 应立刻无输出
+ss -tn state established | grep <端口>   # 应立刻为 0
+# 步骤 1 的终端应在 3 秒内报错退出（新版），旧版会一直跑
+```
+
+### 12.4 常见误判
+
+| 现象 | 错误结论 | 正确判读 |
+|---|---|---|
+| `ss` 里旧 relay 还有几十条连接 | 「删除没生效」 | 看 `lastsnd` 和字节增量：若持续有数据流动，是**连接没被主动关**（旧版 Transport 缺陷）；若只是 `keepalive` 计时器，等 10–15 分钟会自然消失 |
+| 面板显示节点在线但端口不通 | 「面板坏了」 | 面板的 `status` 只看 WebSocket 连接，**不是健康检查**。要去节点上查 gost 是否真的在监听 |
+| agent RSS 从 115 MB 掉到 57 MB | 「Transport 修复省了 58 MB」 | 复合归因：未加壳 + THP 相位重置 + 连接数下降 + 残留连接清除。见《PERFORMANCE_COMPARISON.md》§9.4 |
+| `DeleteServiceResponse success:true` 但连接还在 | 「删除接口有 bug」 | 删除**命令**成功了，是**已建立的连接**没被关。两件事 |
+
+### 12.5 journald 上限（已安装）
+
+```bash
+cat /etc/systemd/journald.conf.d/99-flux.conf
+# SystemMaxUse=200M / SystemMaxFileSize=32M / MaxRetentionSec=1month
+# Compress=yes / RateLimitIntervalSec=30s / RateLimitBurst=2000
+journalctl --disk-usage
+```
+
+实测：379.3 MB → 180.1 MB。
+
+### 12.6 请求日志脱敏验收
+
+```bash
+# 应为 0（明文 secret 不再出现）
+docker logs --since 10m springboot-backend 2>&1 | grep -oE '"secret":"[^"*]{6,}"' | wc -l
+# 应能看到脱敏后的形式
+docker logs --since 10m springboot-backend 2>&1 | grep -oE '"secret":"[^"]*"' | sort -u
+# 期望：9e8b****cd88
+```

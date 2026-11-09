@@ -457,3 +457,97 @@ ls -l /root/pre-rollback-*.db
 
 > 注意必须用 `.backup`，**不能**直接 `docker cp` 复制 `gost.db`：
 > 该库处于 WAL 模式，未合并的 WAL 里有最新数据，直接拷主库文件会丢掉这部分。
+
+---
+
+## 11. 回滚第六轮：Transport 修复与前后端两批缺陷修复（2026-11-09）
+
+### 11.1 涉及对象
+
+| 对象 | 当前值 | 回滚到 |
+|---|---|---|
+| agent 二进制 | `sha256:91f3c258…`（32,092,312 B，未加壳，`go1.23.12`） | `/root/agent_backup_20261109-230427/flux_agent.bak`（8,327,088 B，UPX，`go1.23.4`） |
+| 后端镜像 | `sha256:b0ee363d…` | `sha256:580f0784…`（本轮第一个上线版本）→ `sha256:c42978b6…`（第五轮） |
+| 前端镜像 | `sha256:02d1ee31…` | 本轮之前的前端镜像 |
+| journald | `/etc/systemd/journald.conf.d/99-flux.conf` 已存在 | 删除该文件 |
+| 代码 | `859225a` | `939fc55`（本轮起点） |
+
+### 11.2 回滚 agent（风险最高，先做备份校验）
+
+```bash
+# 0) 确认备份存在且可执行
+ls -l /root/agent_backup_20261109-230427/flux_agent.bak
+/root/agent_backup_20261109-230427/flux_agent.bak -V   # 应输出 gost 3.1.0 (go1.23.4 linux/amd64)
+
+# 1) 回滚
+systemctl stop flux_agent
+cp /root/agent_backup_20261109-230427/flux_agent.bak /etc/flux_agent/flux_agent
+chmod +x /etc/flux_agent/flux_agent
+systemctl start flux_agent
+
+# 2) 验证
+systemctl show flux_agent -p ActiveState -p NRestarts
+ss -ltn | wc -l          # 应与 gost.json 的 service 数一致
+journalctl -u flux_agent --since "2 min ago" | grep -c '"level":"error"'
+```
+
+> **回滚代价**：旧二进制不响应 ctx，**删除端口后连接会继续转发**（本次修复的正是这个）。回滚等于接受该缺陷。
+
+### 11.3 回滚后端 / 前端
+
+```bash
+cd /root
+cp docker-compose.yml.bak-20261110-002444 docker-compose.yml   # 或 .bak-20261109-233154
+docker compose pull backend frontend
+docker compose up -d backend frontend
+```
+
+如果 `docker-compose.yml` 里用的是固定 tag（`2.0.7-beta`），`pull` 会拉到**当前 latest**，而不是旧版。要真正回退必须显式指定 digest：
+
+```bash
+docker pull ahmadplayz721/flux-panel-backend@sha256:580f0784f25f1a1c9f3e2a0b469ee2b64011e0c5db01a8b2db82a559774d4d0c
+docker tag  ahmadplayz721/flux-panel-backend@sha256:580f0784… ahmadplayz721/flux-panel-backend:2.0.7-beta
+docker compose up -d --force-recreate backend
+```
+
+### 11.4 回滚 journald
+
+```bash
+rm /etc/systemd/journald.conf.d/99-flux.conf
+systemctl restart systemd-journald
+journalctl --disk-usage     # 回到默认上限（约 4 GB 的 10%，取决于磁盘）
+```
+
+### 11.5 回滚代码
+
+```bash
+cd /root/v2.0.7-beta
+git revert --no-edit 859225a d7e63e8 d843617 7473a73 cc61535 e34660d 556b96d
+```
+
+六个提交相互独立，可单独回滚：
+
+| 提交 | 内容 | 单独回滚的影响 |
+|---|---|---|
+| `556b96d` | Transport ctx 修复 | 删除端口后连接继续转发（缺陷回归） |
+| `e34660d` | 测试竞态修正 | 无运行时影响 |
+| `cc61535` | failTimeout 30s + 日志脱敏 + NPE 修复 | `failTimeout` 回到 600s；握手日志重新打印 secret |
+| `7473a73` | 隧道静默失败 + 回滚不全 + LRU + 死代码 | 隧道创建失败重新变静默；多入口转发回滚重新变部分 |
+| `d843617` | 请求日志脱敏 | `uploadFlowData` 重新打印 secret 明文 |
+| `d7e63e8` | 前端 24 个 lint error | 条件 Hook 的崩溃风险回归 |
+
+### 11.6 回滚后必须复查
+
+| 项 | 命令 | 期望 |
+|---|---|---|
+| 数据完好 | `sqlite3 gost.db "pragma integrity_check; select count(*) from forward;"` | `ok` + 193 |
+| IPv4 / IPv6 | `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:6365/flow/test`、`curl -g -s -o /dev/null -w '%{http_code}' 'http://[::1]:6365/flow/test'` | `200` / `200` |
+| 节点在线 | 后端日志 `连接建立成功，状态更新为在线` | 4 个节点 |
+| 前端可访问 | `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:6366/` | `200` |
+
+### 11.7 禁止事项
+
+- **不要** `git reset --hard` / `git clean -fd`（会丢工作区）。
+- **不要**用 `docker compose pull` 期望拉到旧版本（tag 指向 latest）。
+- **不要**在 agent 回滚后保留新 `gost.json`（格式兼容，但行为差异会让人误判）。
+- **不要**删除 `/root/agent_backup_20261109-230427/`，这是唯一的旧二进制来源。

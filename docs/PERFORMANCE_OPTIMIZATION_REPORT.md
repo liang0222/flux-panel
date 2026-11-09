@@ -693,3 +693,67 @@ PASSIVE 的 `log=674 done=674` 与 TRUNCATE 完全一致，说明**回写量没�
 | 重复进程 | 仅 1 个 agent 进程、4 个容器，volume filter 只有一个写者 |
 | TCP backlog / conntrack | ListenOverflows 0、insert_failed 0、drop 0 |
 | checkpoint 不阻塞（早期结论） | 早期实验没有 WAL 积压和活跃读快照，条件不足，结论无效 |
+
+---
+
+## 18. 第六轮：连接生命周期优化（2026-11-09）
+
+### 18.1 优化项
+
+| # | 优化 | 类型 | 状态 |
+|---|---|---|---|
+| 1 | `TransportContext` 响应 ctx 取消，删除 service 时主动关两端 | 资源释放 | **已上线** |
+| 2 | `Serve()` 的 defer 顺序改为 `cancel()` → `wg.Wait()` | 资源释放 | **已上线** |
+| 3 | 5 个 handler 调用点传入 ctx | 资源释放 | **已上线** |
+| 4 | `failTimeout` 600 秒 → 30 秒 | 故障切换延迟 | **代码已改，未下发** |
+| 5 | 请求日志脱敏（`LogAspect.maskSensitive`） | 安全 + 日志量 | **已上线** |
+| 6 | 两处无界 `ConcurrentHashMap` → 64 项 LRU | 内存 | **已上线** |
+
+### 18.2 技术原理
+
+**为什么 `chan error` 容量必须是 2？**
+
+```go
+errc := make(chan error, 2)   // 不是 1
+```
+
+ctx 分支提前返回时，两个 copy goroutine 中较慢的那个仍会尝试 `errc <- err`。容量为 1 时它永久阻塞 → 每次取消泄漏一个 goroutine。这是本类修复最容易踩的坑，已写成 `TestTransportContextDoesNotLeakGoroutines`（50 轮取消，`runtime.NumGoroutine()` 增长 ≤5）。
+
+**为什么关两端而不是只关一端？**
+
+`CopyBuffer(dst, src)` 阻塞在 `src.Read` 上。只关 `rw1` 时，反向那个 goroutine 仍阻塞在 `rw2.Read`。必须两端都 `Close()` 才能让两个 goroutine 都从 `Read` 返回。
+
+**为什么用 `io.Closer` 断言而不是强转？**
+
+真实链路里 `conn` 的类型各不相同：`relay/conn.go:12` 的 `tcpConn`、`:32` 的 `udpConn`、`internal/net/net.go:107` 的 `readWriteConn`、`observer/stats/wrapper/conn.go` 的 `conn`。它们都实现 `Close()`，但没有共同的具体类型，只能断言 `io.Closer`。
+
+**`failTimeout` 为什么单节点无效？**
+
+`go-gost/x/hop/hop.go:181-183`：
+
+```go
+if len(nodes) == 1 {
+    return nodes[0]
+}
+```
+
+单节点直接返回，**根本不进 selector**；`go-gost/x/selector/filter.go:28-30` 的 `if len(vs) <= 1 { return vs }` 是第二道同样的短路。所以 600 秒改 30 秒这件事，**在 `chains_7` 只有 1 个 node 的现状下不产生任何行为变化**。
+
+### 18.3 实测效果
+
+| 指标 | 优化前 | 优化后 | 说明 |
+|---|---|---|---|
+| 删除 service 后连接存活 | >20 秒（实测 20 秒仍在收发） | 3.0 秒内 EOF | A/B 对照，同一台机器 |
+| agent `VmRSS` | 110,904 – 123,192 kB | 56,000 – 59,000 kB | **含未加壳 + THP 重置 + 连接数下降的复合效果，不能全归因于本修复** |
+| agent `VmHWM` | 349,372 kB | 65,548 kB | 同上 |
+| agent `AnonHugePages` | 114,688 – 323,584 kB | 0 kB | 新二进制重启后 THP 相位重置 |
+| agent FD | 377 – 1,114 | 200 – 257 | 连接数下降 + 残留连接清除 |
+
+### 18.4 已排除的「优化」
+
+| 想法 | 为什么不采纳 |
+|---|---|
+| 把所有 20+ 个 `xnet.Transport(` 调用点都改成 ctx 版 | 只改了 relay/forward 这 5 条与「转发」相关的路径。其余是 http/socks/ss/sshd 等协议 handler，改动面大、收益未验证、回归风险高 |
+| 给 `Transport` 加读超时 | 会误断空闲长连接（用户的业务本身就是长连接代理），必须靠 ctx 而不是超时 |
+| 直接把 `failTimeout` 改成 0（立即重试） | 出口节点抖动时会疯狂重连，反而放大故障 |
+| 删掉 `EncryptionConfig.java`（无界 `CRYPTO_CACHE` 死代码） | 全仓库零引用，删它无收益；改动有风险（可能是预留扩展点） |

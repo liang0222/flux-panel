@@ -692,3 +692,61 @@ Release `2.0.7-beta-perf`，尚未在生产替换）、前端容器日志轮转�
 ---
 
 *本报告所引用的每一条运行数据均可在《SERVER_MONITORING_GUIDE.md》中找到对应的复现命令。*
+
+---
+
+## 十、第六轮变更（2026-11-09 23:00 – 2026-11-10 00:30）
+
+本轮由「删了隧道旧隧道还在跑」这一用户报障触发，性质与前面五轮不同：**前五轮都在找内存，这一轮找到的是连接生命周期缺陷**。
+
+### 10.1 为什么它属于内存审计范围
+
+删除端口/隧道后连接不释放，在 Linux 侧的代价是双份的：
+
+| 资源 | 表现 |
+|---|---|
+| 进程内存 | 每条存活连接两个 `io.CopyBuffer` goroutine，各持 64 KB `bufpool` 缓冲；生产实测 82 条残留连接仍在传 64 KB/s |
+| 内核内存 | 每条连接一个 socket + 收发缓冲；`ss -tni` 显示单连接 `rcv_space` 最高 825 KB，632 条并存理论上可吃数百 MB |
+| 文件描述符 | agent 的 FD 一度到 1,017（`Max open files 524288`，未触顶但持续累积） |
+
+### 10.2 根因（两处叠加，缺一不可）
+
+1. `go-gost/x/internal/net/transport.go` 的 `Transport()` 用 `io.CopyBuffer` 双向搬运，**完全不接收 ctx**；`relayHandler.Close()` 里的 `h.cancel()` 传不进去。
+2. `go-gost/x/service/service.go` 的 `Serve()` 里 `defer cancel()` 写在 `defer wg.Wait()` 之前，**LIFO 导致 `wg.Wait()` 先执行**，cancel 永远等不到。
+
+两处都成立时，`service.Close()` 只关掉 listener，已 accept 的连接继续跑，直到对端断开或 keepalive 超时（`tcp_keepalive_time=600` + `tcp_retries2=15` → 10~15 分钟以上；若连接持续有数据，keepalive 根本不触发）。
+
+### 10.3 修复与实测对照
+
+| 版本 | 删除 service 后 |
+|---|---|
+| 旧二进制 | `NO LISTENER`（监听消失）+ 持有连接 **`STILL ALIVE after 20s`**，20 秒内持续收发成功 |
+| 新二进制 | `NO LISTENER` + 持有连接 **`EOF at 3.0s`**，`ss` 中该端口 ESTAB 归零 |
+
+### 10.4 内存侧的连带收益（实测，非推断）
+
+agent 二进制同时换成未加壳新构建（`sha256:91f3c258…`，32,092,312 B）：
+
+| 指标 | 升级前（UPX 旧版） | 升级后（新构建） |
+|---|---|---|
+| `VmRSS` | 110,904 – 123,192 kB | **56,000 – 59,000 kB** |
+| `VmHWM` | 349,372 kB（曾达 494,260 kB） | **65,548 kB** |
+| `AnonHugePages` | 114,688 – 323,584 kB | **0 kB** |
+| `Threads` | 17 – 19 | 13 |
+| FD | 377 – 1,114 | 200 – 257 |
+
+> **归因说明**：RSS 下降主要来自「未加壳 + 重启后 THP 相位重置 + 连接数从 ~800 降到 ~200」，**不能全部记在 Transport 修复头上**。Transport 修复的直接收益是「删除后连接立即释放」，而不是稳态 RSS。这一点与前面几轮反复强调的「THP 放大 2.3 倍」是同一件事的两面。
+
+### 10.5 本轮在生产机上的其他变更
+
+| 变更 | 结果 |
+|---|---|
+| journald 上限 200 M 安装（`/etc/systemd/journald.conf.d/99-flux.conf`） | 379.3 MB → 180.1 MB |
+| 请求日志脱敏（`LogAspect.maskSensitive`） | `secret` 明文计数 0，日志中为 `9e8b****cd88` |
+| 后端两批缺陷修复 + 前端 24 个 lint error | 详见《CODE_CHANGELOG.md》第 19 节 |
+
+### 10.6 仍未验证的项
+
+- 修复后**长期**（24 小时以上）FD / goroutine / RSS 趋势：截至本报告写作时新 agent 仅运行约 1.5 小时。
+- 其他节点（node 5 / 6 的 2.0.2 旧版、node 4 的 1.2.4）升级后是否同样收益：未升级，未测。
+- `failTimeout` 30 秒的实际 failover 效果：**代码已改但未下发到节点**，且单节点时 `go-gost/x/hop/hop.go:181-183` 短路使 fail filter 完全不生效。
