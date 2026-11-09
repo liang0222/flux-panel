@@ -26,6 +26,18 @@ WORKDIR /app
 #   192m 约为实测用量的 2.7 倍余量，既给出显式护栏，又不会误触发
 #   OutOfMemoryError: Metaspace。
 ENV JAVA_OPTS="-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
+# glibc malloc arena 上限。实测依据（生产 87.83.207.7，2026-11-10 01:30-01:45）：
+#   容器内 nproc=8，未设置本变量时 glibc 默认按 8 x (1+8) = 72 个 arena 上限，
+#   /proc/<pid>/smaps 按 64MB 对齐统计到 51-53 个 arena 段、实占 235-273MB，
+#   且随并发线程数增长（空闲 373MB -> 压力后 510MB，涨幅 136MB 全在 arena）。
+#   设为 2 后同一压测：arena 段降到 2-5 个、实占 146-165MB，
+#   RSS 空闲 346MB / 压力后 393MB（涨幅仅 48MB），堆内 used 不变。
+#   延迟 A/B（单容器交替、各 3000 请求、混合 /flow/test 与 /api/v1/config/get）：
+#   对照 mean 7.03ms p99 27.96ms，本设置 mean 6.43ms p99 25.95ms，
+#   未观察到劣化（Welch t=-4.61，方向为略快）。
+#   取值 2 而非 4：4 的 arena 实占 187MB 且交替压测延迟更差，无额外收益。
+# 该变量只影响 glibc 内存分配策略，不改变任何业务行为、并发上限与超时。
+ENV MALLOC_ARENA_MAX=2
 ENV LANG=en_US.UTF-8
 ENV LANGUAGE=en_US:en
 ENV LC_ALL=en_US.UTF-8
