@@ -732,26 +732,44 @@ echo "$(date +%H:%M:%S) rss=$(awk '/VmRSS/{print $2}' /proc/$P/status)kB hwm=$(a
 
 ```python
 #!/usr/bin/env python3
+# 用法: python3 arena_stat.py <java_pid>
+# 统计 glibc malloc arena 的实占内存（已排除 G1 堆保留区）
 import sys, re
+
 pid = sys.argv[1]
 vmas, cur = [], None
 for line in open('/proc/%s/smaps' % pid):
     m = re.match(r'^([0-9a-f]+)-([0-9a-f]+) (\S+) \S+ \S+ \S+\s*(.*)$', line)
     if m:
-        if cur: vmas.append(cur)
-        cur = {'start': int(m.group(1), 16), 'perm': m.group(3),
-               'path': m.group(4).strip(), 'rss': 0}
+        if cur:
+            vmas.append(cur)
+        cur = {'start': int(m.group(1), 16), 'end': int(m.group(2), 16),
+               'perm': m.group(3), 'path': m.group(4).strip(), 'rss': 0}
     elif cur is not None and line.startswith('Rss:'):
         cur['rss'] = int(line.split()[1])
-if cur: vmas.append(cur)
+if cur:
+    vmas.append(cur)
 
 anon = [v for v in vmas if v['path'] == '' and 'w' in v['perm']]
-aligned = [v for v in anon if v['start'] % (64 * 1024 * 1024) == 0]
+# 64MB 对齐 + 至少 32MB，是 glibc arena 与 G1 堆保留区的共同特征
+cand = [v for v in anon
+        if v['start'] % (64 * 1024 * 1024) == 0 and (v['end'] - v['start']) >= 32 * 1024 * 1024]
+
+# 0xe0000000 是 JDK 在 Linux x86-64 上的默认 G1 堆基址，不是 arena，必须排除。
+# 若 JVM 改了堆基址（-XX:HeapBaseMinAddress），这里要同步调整。
+G1_BASE = 0xe0000000
+arena = [v for v in cand if v['start'] != G1_BASE]
+g1 = [v for v in cand if v['start'] == G1_BASE]
+
 print('vma_total   = %d' % len(vmas))
 print('anon_rw     = %d' % len(anon))
-print('arena_segs  = %d' % len(aligned))
-print('arena_rss   = %.1f MB' % (sum(v['rss'] for v in aligned) / 1024))
-print('non_arena   = %.1f MB' % ((sum(v['rss'] for v in anon) - sum(v['rss'] for v in aligned)) / 1024))
+print('arena_segs  = %d' % len(arena))
+print('arena_rss   = %.1f MB' % (sum(v['rss'] for v in arena) / 1024))
+print('g1_heap_rss = %.1f MB' % (sum(v['rss'] for v in g1) / 1024))
+print('non_arena   = %.1f MB' % ((sum(v['rss'] for v in anon) - sum(v['rss'] for v in arena) - sum(v['rss'] for v in g1)) / 1024))
+for v in cand:
+    tag = 'G1 堆(排除)' if v['start'] == G1_BASE else 'arena'
+    print('  0x%x  vma=%d kB  rss=%d kB  %s' % (v['start'], (v['end'] - v['start']) // 1024, v['rss'], tag))
 ```
 
 部署：`docker cp` 不需要，直接在宿主机放 `/root/arena_stat.py`，用容器 PID 调用即可（`/proc/<pid>/smaps` 宿主可见）。
@@ -762,3 +780,60 @@ print('non_arena   = %.1f MB' % ((sum(v['rss'] for v in anon) - sum(v['rss'] for
 2. **`VmHWM` 只增不减**，是历史峰值，不能用来判断"现在是否泄漏"。
 3. **arena 段数包含 G1 堆保留区**，绝对值为 3 时真实 arena 是 1–2 个，不要按"应该等于 2"去核。
 4. **换内核 / 改 THP 策略后旧基线全部作废**，必须重新采基线再谈涨跌。
+
+## 14. 原生内存归还（TrimNativeHeapInterval）的观察方法
+
+### 14.1 判断参数是否生效
+
+```bash
+docker inspect springboot-backend --format '{{range .Config.Env}}{{println .}}{{end}}' | grep JAVA_OPTS
+# 必须含 -XX:TrimNativeHeapInterval=15000
+
+docker exec springboot-backend java -XX:+PrintFlagsFinal -XX:TrimNativeHeapInterval=15000 -version 2>/dev/null | grep TrimNativeHeapInterval
+# 应输出 = 15000 {product} {command line}
+```
+
+### 14.2 正确的 arena 统计（扣除 G1 堆）
+
+```bash
+JP=$(pgrep -f app.jar | head -1)
+python3 /root/arena_stat.py "$JP"
+```
+
+脚本内容见 §13.4。输出形如：
+
+```
+0xe0000000       VMA 75,776 kB   RSS 73,024 kB   <- G1 堆，排除
+0x7c1cd0000000   VMA 63,780 kB   RSS 25,600 kB   <- glibc arena，这才是要看
+```
+
+关键：`0xe0000000` 是 **G1 堆的保留区基址**（JDK 在 Linux x86-64 上固定映射），不是 glibc arena。做 arena 归因时必须把它排除，否则会凭空多出 73 MB。
+
+### 14.3 观察 RSS 呼吸
+
+```bash
+JP=$(pgrep -f app.jar | head -1)
+for i in $(seq 1 20); do
+  ts=$(date +%H:%M:%S)
+  rss=$(awk '/VmRSS/{print $2}' /proc/$JP/status)
+  hwm=$(awk '/VmHWM/{print $2}' /proc/$JP/status)
+  echo "$ts rss=${rss}kB hwm=${hwm}kB"
+  sleep 15
+done
+```
+
+正常形态：`VmRSS` 在 240-290 MB 之间上下波动（周期约 15 秒，与 trim 间隔一致），`VmHWM` 恒定在启动峰值（约 331 MB）。
+
+异常形态：
+
+| 现象 | 可能原因 | 下一步 |
+|---|---|---|
+| `VmRSS` 单调上升且 `VmHWM` 跟着涨 | 真泄漏 | SIGQUIT 看堆，`pprof` 看 Go 侧 |
+| `VmRSS` 恒定在 350 MB 以上 | 参数没生效 | 先查 `docker inspect` 的 `JAVA_OPTS` |
+| 波动超过 100 MB | trim 间隔过短或堆频繁扩缩 | 调大间隔或看 GC 日志 |
+
+### 14.4 三个常见误判
+
+1. 看到 RSS 在动就以为有问题——trim 的存在就是为了让它动。只要 `VmHWM` 不涨，就是健康的。
+2. 用 `docker stats` 判断泄漏——它读的是 cgroup `memory.current`，含 page cache，波动比进程 RSS 更大。判泄漏看 `VmHWM` 与长期趋势。
+3. 把 `0xe0000000` 算进 arena——会凭空多出 73 MB，导致「限制 arena 没效果」的错误结论。

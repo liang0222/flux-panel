@@ -623,3 +623,51 @@ docker logs --since 5m springboot-backend 2>&1 | grep "连接建立成功"
 - **不要**用 `docker compose down` 再 `up`（会中断全部节点连接，且不解决版本问题）。
 - **不要**在没有备份 `docker-compose.yml` 的情况下修改镜像 tag。
 - **不要**通过 `mem_limit` 压低容器内存来"解决" arena 问题——那只会把问题变成 OOMKilled。
+
+## 13. 回滚第十三轮（原生内存归还）
+
+### 13.1 回滚对象
+
+| 对象 | 当前值 | 回滚目标 |
+|---|---|---|
+| `JAVA_OPTS`（生产 `/root/docker-compose.yml`） | 含 `-XX:TrimNativeHeapInterval=15000` | 去掉该参数 |
+| `springboot-backend/Dockerfile` | 同上 | 同上 |
+| 四个 compose 文件 | 同上 | 同上 |
+| 代码提交 | `851aedc`、`abb5cec`、`a2b97b7`（`ResetFlowAsync`） | `git revert` |
+
+### 13.2 最快回滚（不重新构建镜像）
+
+```bash
+cd /root
+cp docker-compose.yml /root/docker-compose.yml.bak-rollback-$(date +%Y%m%d-%H%M%S)
+sed -i 's| -XX:TrimNativeHeapInterval=15000||' docker-compose.yml
+docker compose up -d backend
+sleep 45
+docker inspect springboot-backend --format 'status={{.State.Status}} health={{.State.Health.Status}} restarts={{.RestartCount}}'
+```
+
+回滚后 RSS 会从约 244 MB 回到约 300–356 MB，属于预期。
+
+### 13.3 完整回滚（含代码）
+
+```bash
+git revert --no-edit 851aedc abb5cec
+# ResetFlowAsync 的修复是独立的缺陷修复，一般不需要回滚；如需回滚：
+# git revert --no-edit a2b97b5
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta -f springboot-backend/Dockerfile springboot-backend
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+```
+
+### 13.4 回滚后必查
+
+```bash
+docker inspect springboot-backend --format 'status={{.State.Status}} health={{.State.Health.Status}} oom={{.State.OOMKilled}}'
+curl -s -o /dev/null -w 'v4=%{http_code}\n' http://127.0.0.1:6365/flow/test
+curl -s -o /dev/null -w 'v6=%{http_code}\n' 'http://[::1]:6365/flow/test'
+docker exec springboot-backend sqlite3 /app/data/gost.db 'pragma integrity_check;'
+```
+
+### 13.5 回滚代价
+
+- 该参数只影响空闲原生内存何时归还，**不涉及任何数据、接口、认证、并发**，回滚零风险。
+- 唯一变化是 RSS 回到约 300–356 MB。

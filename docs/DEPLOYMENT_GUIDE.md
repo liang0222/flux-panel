@@ -595,3 +595,72 @@ docker logs --since 5m springboot-backend 2>&1 | grep -oE '"secret":"[^"]*"' | s
 - 该变量写进 **Dockerfile**，不是 compose。因此**必须重建镜像**才会生效，改 compose 环境变量不会影响已有镜像层。
 - 若后续在 compose 里显式覆盖 `MALLOC_ARENA_MAX`，compose 的值优先。
 - 回滚见 `ROLLBACK_GUIDE.md` §12。
+
+## 10. 第十三轮上线（TrimNativeHeapInterval）
+
+### 10.1 变更
+
+| 文件 | 变更 |
+|---|---|
+| `springboot-backend/Dockerfile` | `ENV JAVA_OPTS` 增加 `-XX:TrimNativeHeapInterval=15000` |
+| `docker-compose-v4.yml` | 同上（`environment.JAVA_OPTS`） |
+| `docker-compose-v6.yml` | 同上 |
+| `deploy/docker-compose.yml` | 同上 |
+| `deploy/docker-compose.registry.yml` | 同上 |
+
+**为什么两处都要改**：Docker 的 `environment:` 会**覆盖**镜像的 `ENV`。只改 Dockerfile 时，用 compose 启动的实例拿不到该参数——第一次上线就踩了这个坑（容器 `JAVA_OPTS` 里没有 `TrimNativeHeapInterval`）。
+
+### 10.2 构建与推送
+
+```bash
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta -f springboot-backend/Dockerfile springboot-backend
+docker image inspect ahmadplayz721/flux-panel-backend:2.0.7-beta --format '{{range .Config.Env}}{{println .}}{{end}}' | grep JAVA_OPTS
+# 应看到 -XX:TrimNativeHeapInterval=15000
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+```
+
+本次 digest：`sha256:ff40dbd6f3cc1ca936cd543723a4fdcdabcaaf12f6e5e5c00af70ff5280bfcae`。
+
+### 10.3 生产更新
+
+```bash
+cd /root
+cp docker-compose.yml /root/docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)
+# 给 JAVA_OPTS 加上参数（若尚未加）
+sed -i 's|-XX:MaxMetaspaceSize=192m -Dfile.encoding|-XX:MaxMetaspaceSize=192m -XX:TrimNativeHeapInterval=15000 -Dfile.encoding|' docker-compose.yml
+docker compose pull backend && docker compose up -d backend
+```
+
+### 10.4 上线后必查
+
+```bash
+docker inspect springboot-backend --format '{{range .Config.Env}}{{println .}}{{end}}' | grep JAVA_OPTS
+# 必须含 -XX:TrimNativeHeapInterval=15000
+
+JP=$(pgrep -f app.jar | head -1)
+grep -E 'VmRSS|VmHWM|Threads' /proc/$JP/status
+# 预期：VmRSS 240-290 MB，VmHWM 约 331 MB（启动峰值后不再增长）
+
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:6365/flow/test
+curl -s -o /dev/null -w '%{http_code}\n' 'http://[::1]:6365/flow/test'
+docker exec springboot-backend sqlite3 /app/data/gost.db 'pragma integrity_check;'
+```
+
+### 10.5 实测结果
+
+| 指标 | 上线前 | 上线后 |
+|---|---:|---:|
+| `docker stats` | 298.6 MiB | **228.4 MiB** |
+| `VmRSS` | 356,956 kB | 240–287 MB（中位 244 MB） |
+| `VmHWM` | 356,956 kB | 331,248 kB（恒定） |
+| glibc arena（扣 G1） | 约 63 MB | **25.6 MB** |
+| 堆 used / Metaspace | 46.5 MB / 61 MB | 不变 |
+| 线程 | 45–47 | 45–48 |
+| v4 / v6 / front | 200 / 200 / 200 | 200 / 200 / 200 |
+| `integrity_check` | ok | ok |
+| 数据量 | 193/193/5/2/4/1 | 不变 |
+
+### 10.6 注意
+
+- RSS 会在 240–287 MB 之间波动，周期约 15 秒——这是 trim 的正常呼吸，不是抖动。
+- 回滚只需去掉 `-XX:TrimNativeHeapInterval=15000` 并 `docker compose up -d backend`，**无需重新构建镜像、无需动数据**。
