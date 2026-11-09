@@ -723,3 +723,80 @@ docker logs --since 5m springboot-backend 2>&1 | grep -cE "ERROR|Exception"   # 
 
 - **Dockerfile 里同名 `ENV` 是覆盖不是追加**。本轮把重复的 `ENV JAVA_OPTS` 合并成一行，并在上方注明「唯一一处、必须包含全部参数」。以后往 `JAVA_OPTS` 加参数，必须改那一行，不能在别处再写一个 `ENV JAVA_OPTS=...`，否则前面的参数会被悄悄丢掉。
 - **安装命令的 tag 引用**：面板「节点监控 → 安装命令」现在指向 `refs/tags/2.0.7-beta-perf`。以后移动 tag 时，`install.sh`、`panel_install.sh` 的 compose 引用、以及这个安装命令会一起切到新内容——改 tag 等于给所有新装/升级换脚本，需谨慎。
+
+## 11. 第十四轮上线（配置上报批量查询 + 交付链路修正）
+
+### 11.1 本轮变更
+
+| 提交 | 内容 |
+| --- | --- |
+| `124a96e` | 配置上报的孤立项清理改用批量查询；Dockerfile 去掉重复的 `ENV JAVA_OPTS` |
+| `fc45e60` | 节点安装命令从 `refs/heads/feat/...` 改指 `refs/tags/2.0.7-beta-perf` |
+
+### 11.2 构建与推送
+
+```bash
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta \
+  -f springboot-backend/Dockerfile springboot-backend
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+# manifest list digest: sha256:12d65638a77e4cfebcb9a224881c0211a0d2053669b5e36c8d1fc9d0fc86a082
+```
+
+构建后核对（可选但建议）：
+
+```bash
+CID=$(docker create ahmadplayz721/flux-panel-backend:2.0.7-beta)
+docker cp $CID:/app/app.jar /tmp/app.jar && docker rm -f $CID
+python3 - <<'PY'
+import zipfile
+z = zipfile.ZipFile('/tmp/app.jar')
+d = z.read('BOOT-INF/classes/com/admin/common/task/CheckGostConfigAsync.class')
+print('findOrphanServices', b'findOrphanServices' in d)
+print('findOrphanChains  ', b'findOrphanChains' in d)
+n = z.read('BOOT-INF/classes/com/admin/service/impl/NodeServiceImpl.class')
+print('tag 引用          ', b'refs/tags/2.0.7-beta-perf' in n)
+PY
+```
+
+### 11.3 生产更新
+
+```bash
+cp /root/docker-compose.yml /root/docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)
+cd /root && docker compose pull backend && docker compose up -d backend
+```
+
+本轮实测在 2026-11-10 03:50:34 CST 完成，备份 `/root/docker-compose.yml.bak-20261110-035025`。
+
+### 11.4 上线后必查
+
+```bash
+docker inspect springboot-backend --format 'status={{.State.Status}} health={{.State.Health.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}'
+curl -s -o /dev/null -w 'v4=%{http_code}\n' http://127.0.0.1:6365/flow/test
+curl -s -o /dev/null -w 'v6=%{http_code}\n' 'http://[::1]:6365/flow/test'
+docker logs --since 5m springboot-backend 2>&1 | grep -c '连接建立成功'          # 应为在线节点数
+docker logs --since 25m springboot-backend 2>&1 | grep -c '删除孤立'             # 无孤立项时应为 0
+docker logs --since 25m springboot-backend 2>&1 | grep -cE 'ERROR|Exception'     # 应为 0
+docker logs --since 25m springboot-backend 2>&1 | grep -c '"secret":"[0-9a-f]\{32\}"'  # 明文应为 0
+docker exec springboot-backend sqlite3 /app/data/gost.db "select count(*) from forward; pragma integrity_check;"
+```
+
+**重点看 `删除孤立`**——这条日志非 0 说明节点上确实有面板已不认识的 service/chain 被清掉了，属正常行为；但如果一次性出现几十条，要立刻检查是不是批量查询走了异常分支把什么都判成孤立了（正常情况下异常分支会整轮跳过，不会误删）。
+
+### 11.5 本轮实测结果
+
+| 项 | 值 |
+| --- | --- |
+| 容器状态 | `running` / `healthy` / `restarts=0` / `oom=false` |
+| HTTP | `v4=200`、`v6=200`、`front=200` |
+| 节点重连 | 5 / 2 / 6（2.0.2）、4（1.2.4）全部在线 |
+| 数据 | `forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4 / user 1`，`integrity_check=ok` |
+| 孤立清理 | 25 分钟内 0 条（当前无孤立项） |
+| 明文 secret | 0 |
+| `ERROR|Exception` | 0 |
+| 内存 | `VmRSS 249,364 kB`、`VmHWM 332,924 kB`、`VmSwap 0`、`Threads 47` |
+| `docker stats` | backend 222.5 MiB / 0.46% CPU、frontend 3.074 MiB |
+
+### 11.6 注意
+
+- 本轮**不改变任何接口、数据与前端行为**，回滚只需把镜像 tag 指回 `sha256:e301f7cc…` 或更早的 `sha256:ff40dbd6…`。
+- 批量查询失败时**整轮跳过清理**是刻意设计：宁可少删一轮，也不要在数据库抖动时把全部 service 判成孤立。看到「清理服务配置失败」日志不必立即处理，下一轮会自动重试。

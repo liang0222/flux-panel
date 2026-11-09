@@ -1185,3 +1185,100 @@ for (ConfigItem service : configItems) {
    `https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/install.sh`，
    分支会漂移，用户在面板里点「安装命令」可能拿到未发布的脚本。改为 `refs/tags/2.0.7-beta-perf/install.sh`，与 `panel_install.sh` 拉 compose 的口径统一。
    验证：`mvn test` 112 例全过；解包 jar 确认 `NodeServiceImpl.class` 含 `refs/tags/2.0.7-beta-perf`、不含 `refs/heads/feat/port-traffic-ranking`。
+
+## 24. 第十四轮：配置上报的孤立项清理批量查询（2026-11-10）
+
+### 24.1 问题（提交 `124a96e`）
+
+`springboot-backend/src/main/java/com/admin/common/task/CheckGostConfigAsync.java`
+
+`cleanOrphanedServices()` / `cleanOrphanedChains()` 原实现对上报列表里的**每一项各查一次库**：
+
+```java
+for (ConfigItem service : configItems) {      // 生产单节点约 166 项
+    safeExecute(() -> {
+        ...
+        Tunnel tunnel = tunnelId == null ? null : tunnelService.getById(tunnelId);
+        if (tunnel == null) { GostUtil.DeleteService(...); }
+    }, "清理服务 " + service.getName());
+}
+```
+
+节点每 10 分钟上报一次完整 gost 配置，5 个节点合计每 10 分钟约 800 条单行 SELECT。单条走主键索引、微秒级，不构成响应瓶颈，但属于「用 O(n) 次往返换一个集合成员判断」。
+
+### 24.2 修改
+
+| 位置 | 改动 |
+| --- | --- |
+| `cleanOrphanedServices(List<ConfigItem>, Node)` | 简化为「遍历 `findOrphanServices` 的结果 → `GostUtil.DeleteService` → 记日志」 |
+| 新增 `List<JSONArray> findOrphanServices(List<ConfigItem>)` | 包级可见。先扫名字收集 id，`listByIds` 批量取存在集合，再逐条判定 |
+| `cleanOrphanedChains(List<ConfigItem>, Node)` | 同上，简化为遍历 `findOrphanChains` 结果 |
+| 新增 `List<String> findOrphanChains(List<ConfigItem>)` | 包级可见。chain 名为 `chains_<tunnelId>`，批量查 tunnel 后判定 |
+| 新增 `private Set<Long> loadExistingIds(Set<Long>, Function<List<Long>, Set<Long>>)` | 空入参返回 `emptySet()` 不发查询；**查询抛异常返回 `null`** |
+| imports | 增 `Collections` / `HashSet` / `Set` / `stream.Collectors` |
+
+### 24.3 唯一真正的风险点：失败路径的返回值语义
+
+`loadExistingIds` 在查询抛异常时返回 **`null`** 而不是空集合：
+
+| 返回值 | 调用方推断 | 后果 |
+| --- | --- | --- |
+| `Collections.emptySet()` | 「所有 id 都不存在」 | 166 个 service 全判孤立 → 对节点下发上百条删除命令 |
+| `null` | 「本轮无法判断」 | 整轮跳过清理，下一轮再试 |
+
+原实现查库异常被 `safeExecute` 吞掉、该条不删，是安全的。批量改造若让异常路径返回空集合，就把一次可恢复的数据库抖动放大成不可恢复的大规模误删。
+
+### 24.4 判定语义未变（两处易看错的既有行为）
+
+- `web_api` 是面板自身注册的服务，永远跳过；
+- `x_tls` 这类「id 段不是数字」的名字：`parseId` 返回 `null` → 走进 `tunnelId == null` 分支 → **判为孤立并删除**。这是改造前就有的行为，本轮只是把它固定进测试。
+
+### 24.5 测试
+
+新增 `springboot-backend/src/test/java/com/admin/common/task/CheckGostConfigAsyncOrphanTest.java`（6 例）：
+
+| 用例 | 锁定内容 |
+| --- | --- |
+| `existingForwardKeptAndMissingForwardDeleted` | 存在的转发不删；不存在的返回 tcp+udp 两条 |
+| `queryFailureYieldsNoOrphans` | 批量查询抛异常 → 返回空列表，一条不删 |
+| `forwardLookupIsBatchedNotPerItem` | 50 项只调用 1 次 `listByIds`，`getById` 0 次 |
+| `existingChainKeptAndMissingChainDeleted` | chain 判定同上 |
+| `chainQueryFailureYieldsNoOrphans` | chain 查询失败同样不删 |
+| `malformedNamesIssueNoQuery` | `web_api`/`weird` 跳过、`x_tls` 判孤立、foward/tunnel 均未发查询 |
+
+> **踩坑**：首版测试用 `Mockito.mockStatic(GostUtil.class)`，报 `The used MockMaker SubclassByteBuddyMockMaker does not support the creation of static mocks`——项目只有 `spring-boot-starter-test`，没有 `mockito-inline`。解决办法不是加依赖，而是把判定逻辑从执行路径里拆出来（`findOrphanServices` / `findOrphanChains`），直接测返回值。副作用是生产代码也更清晰了一点。
+
+全量 `mvn test`：**Tests run: 112, Failures: 0, Errors: 0, BUILD SUCCESS**（原 106）。
+
+### 24.6 部署（2026-11-10 03:50:34 CST）
+
+镜像 `sha256:12d65638a77e4cfebcb9a224881c0211a0d2053669b5e36c8d1fc9d0fc86a082`，备份 `/root/docker-compose.yml.bak-20261110-035025`。
+
+上线后 25 分钟观察：`配置数据接收成功` 6 次、`删除孤立` **0 条**（当前无孤立项，符合预期）、`ERROR|Exception` **0**、`forward 193`、`integrity_check=ok`、`v4=200`/`v6=200`/`front=200`、`VmRSS 249,364 kB`、`VmHWM 332,924 kB`、`Threads 47`、`docker stats 222.5 MiB`。
+
+### 24.7 未做
+
+- **没有做压测对比**。收益是「每 10 分钟少约 800 次微秒级主键查询」，低于可测量阈值，无法在合理实验设计下从噪声中分辨。定性为「消除了确定存在的浪费」，不声称「实测提速多少」。
+- `cleanOrphanedLimiters` 未改（限流器数量远少于 service，且 `IN` 查询收益有限，改动风险大于收益）。
+
+## 25. 交付链路两处修正（2026-11-10）
+
+### 25.1 Dockerfile 的 `ENV JAVA_OPTS` 声明了两次（提交 `124a96e`）
+
+`springboot-backend/Dockerfile` 里 `ENV JAVA_OPTS` 出现两次：第一次不含 `-XX:TrimNativeHeapInterval=15000`，第二次包含。Docker 对同名 `ENV` 是**覆盖**不是追加，第一行完全被盖掉，功能无影响，但任何人读 Dockerfile 都会先看到那行错误的参数。
+
+已删掉第一行，保留行上方加注释：「最终生效的 JAVA_OPTS（唯一一处）…Dockerfile 里重复声明 ENV 会覆盖而不是追加」。
+
+### 25.2 节点安装命令指向分支而非 tag（提交 `fc45e60`）
+
+`springboot-backend/src/main/java/com/admin/service/impl/NodeServiceImpl.java:124` 的 `getInstallCommand(Long id)` 原拼：
+
+```
+https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/install.sh
+```
+
+分支会漂移——用户在面板里复制的安装命令可能拿到尚未发布的脚本。改为 `refs/tags/2.0.7-beta-perf/install.sh`，与 `panel_install.sh` 拉 compose 的口径统一。
+
+`README.md:47/56` 的两条命令仍指向分支（面向开发者，保持分支语义，未改）。
+
+验证：`mvn test` 112 例全过；解包 jar 后 `NodeServiceImpl.class` 含 `refs/tags/2.0.7-beta-perf`。
