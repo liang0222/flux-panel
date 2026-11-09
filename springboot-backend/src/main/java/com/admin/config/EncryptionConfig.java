@@ -4,7 +4,9 @@ import com.admin.common.utils.AESCrypto;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * 加密配置管理类
@@ -14,8 +16,19 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 public class EncryptionConfig {
     
-    // 缓存加密器实例，避免重复创建
-    private static final ConcurrentHashMap<String, AESCrypto> CRYPTO_CACHE = new ConcurrentHashMap<>();
+    // 缓存加密器实例，避免重复创建。
+    // 优化：原实现用 ConcurrentHashMap 且无任何淘汰逻辑，key 是节点 secret，
+    // 节点删除/重建后旧 entry 会永久驻留。这里改成与 FlowController / WebSocketServer
+    // 一致的有界 LRU（上限 64 个节点）。本类当前无调用方（保留以备将来使用），
+    // 改为有界只是消除潜在的无界增长，不影响任何现有行为。
+    private static final int CRYPTO_CACHE_SIZE = 64;
+    private static final Map<String, AESCrypto> CRYPTO_CACHE = Collections.synchronizedMap(
+            new LinkedHashMap<String, AESCrypto>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, AESCrypto> eldest) {
+                    return size() > CRYPTO_CACHE_SIZE;
+                }
+            });
     
     /**
      * 获取或创建AES加密器实例
