@@ -196,10 +196,24 @@ public class ResetFlowAsync {
             for (Forward forward : forwardList) {
 
                 List<ChainTunnel> chainTunnels = chainTunnelService.list(new QueryWrapper<ChainTunnel>().eq("tunnel_id", forward.getTunnelId()).eq("chain_type", 1));
-                for (ChainTunnel chainTunnel : chainTunnels) {
-                    UserTunnel userTunnel = userTunnelService.getOne(new QueryWrapper<UserTunnel>().eq("user_id", forward.getUserId()).eq("tunnel_id", forward.getTunnelId()));
-                    if (userTunnel != null) {
-                        String name = buildServiceName(forward.getId(), forward.getUserId(), userTunnel.getId());
+                if (chainTunnels.isEmpty()) {
+                    forward.setStatus(0);
+                    forwardService.updateById(forward);
+                    continue;
+                }
+                // 优化：原实现把 userTunnel 查询放在 chainTunnel 内层循环里，
+                // 同一条转发的每个入口节点都会重复查一次（N 个节点 = N 次相同查询），
+                // 且用了会抛异常的 getOne。这里提到循环外只查一次，并用
+                // getOne(wrapper, false) 避免同一用户隧道存在多条记录时抛
+                // TooManyResultsException（抛异常会被外层 catch 吞掉，导致后续
+                // 过期用户/隧道全部漏处理）。
+                UserTunnel userTunnel = userTunnelService.getOne(
+                        new QueryWrapper<UserTunnel>()
+                                .eq("user_id", forward.getUserId())
+                                .eq("tunnel_id", forward.getTunnelId()), false);
+                if (userTunnel != null) {
+                    String name = buildServiceName(forward.getId(), forward.getUserId(), userTunnel.getId());
+                    for (ChainTunnel chainTunnel : chainTunnels) {
                         GostUtil.PauseAndResumeService(chainTunnel.getNodeId(), name, "PauseService");
                     }
                 }
