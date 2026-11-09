@@ -230,12 +230,9 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                     }else {
                         this.removeById(tunnel.getId());
                         chainTunnelService.remove(new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnel.getId()));
-                        for (JSONObject serviceSuccess : service_success) {
-                            JSONArray jsonArray = new JSONArray();
-                            jsonArray.add(serviceSuccess.getString("name"));
-                            GostDto deleteService = GostUtil.DeleteService(serviceSuccess.getLong("node_id"), jsonArray);
-                            log.warn("回滚服务失败: {}", deleteService);
-                        }
+                        // 修复：原实现只回滚 service_success，已建成功的 chain 会残留在节点上。
+                        rollbackChains(chain_success);
+                        rollbackServices(service_success);
                         return R.err(gostDto.getMsg());
                     }
                 }
@@ -253,12 +250,9 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                 }else {
                     this.removeById(tunnel.getId());
                     chainTunnelService.remove(new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnel.getId()));
-                    for (JSONObject serviceSuccess : service_success) {
-                        JSONArray jsonArray = new JSONArray();
-                        jsonArray.add(serviceSuccess.getString("name"));
-                        GostDto deleteService = GostUtil.DeleteService(serviceSuccess.getLong("node_id"), jsonArray);
-                        log.warn("回滚服务失败: {}", deleteService);
-                    }
+                    // 修复：原实现只回滚 service_success，已建成功的 chain 会残留在节点上。
+                    rollbackChains(chain_success);
+                    rollbackServices(service_success);
                     return R.err(gostDto.getMsg());
                 }
             }
@@ -627,6 +621,28 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
 
     private DiagnosisResult performTcpPingDiagnosisWithConnectionCheck(Node node, String targetIp, int port, String description) {
         return TcpPingDiagnosisRunner.run(node, targetIp, port, description);
+    }
+
+    /**
+     * 回滚已下发成功的转发链。失败只记日志，不中断后续回滚。
+     */
+    private void rollbackChains(List<JSONObject> chainSuccess) {
+        for (JSONObject chain : chainSuccess) {
+            GostDto deleteChains = GostUtil.DeleteChains(chain.getLong("node_id"), chain.getString("name"));
+            log.warn("回滚转发链失败: {}", deleteChains);
+        }
+    }
+
+    /**
+     * 回滚已下发成功的链路服务。失败只记日志，不中断后续回滚。
+     */
+    private void rollbackServices(List<JSONObject> serviceSuccess) {
+        for (JSONObject service : serviceSuccess) {
+            JSONArray jsonArray = new JSONArray();
+            jsonArray.add(service.getString("name"));
+            GostDto deleteService = GostUtil.DeleteService(service.getLong("node_id"), jsonArray);
+            log.warn("回滚服务失败: {}", deleteService);
+        }
     }
 
 }

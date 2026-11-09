@@ -225,6 +225,11 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
 
             Node node = nodeService.getById(chainTunnel.getNodeId());
             if (node == null) {
+                // 修复：原实现在此直接 return，此时 forward / forward_port 已落库、
+                // 前面节点上的 service 也已建立，全部残留。改为与下发失败一致的回滚。
+                this.removeById(forward.getId());
+                forwardPortService.remove(new QueryWrapper<ForwardPort>().eq("forward_id", forward.getId()));
+                rollbackCreatedServices(success);
                 return R.err("部分节点不存在");
             }
             GostDto gostDto = GostUtil.AddAndUpdateService(serviceName, limiter, node, forward, forwardPort, tunnel, "AddService");
@@ -238,12 +243,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
                 forwardPortService.remove(new QueryWrapper<ForwardPort>().eq("forward_id", forward.getId()));
                 // 修复：原实现把 return 写在了回滚循环体内，多入口节点时只回滚第一个已建 service，
                 // 其余节点上的 service 会残留。这里先回滚全部已成功的节点，再统一返回错误。
-                for (JSONObject jsonObject : success) {
-                    JSONArray se = new JSONArray();
-                    se.add(jsonObject.getString("name") + "_tcp");
-                    se.add(jsonObject.getString("name") + "_udp");
-                    GostUtil.DeleteService(jsonObject.getLong("node_id"), se);
-                }
+                rollbackCreatedServices(success);
                 return R.err(gostDto.getMsg());
             }
 
@@ -894,6 +894,21 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     private String buildServiceName(Long forwardId, Integer userId, UserTunnel userTunnel) {
         int userTunnelId = (userTunnel != null) ? userTunnel.getId() : 0;
         return forwardId + "_" + userId + "_" + userTunnelId;
+    }
+
+    /**
+     * 回滚创建转发过程中已下发成功的节点服务。
+     * 每个节点上有 tcp / udp 两条 service，名字前缀相同、后缀不同。
+     * 删除失败只记日志，不中断后续回滚。
+     */
+    private void rollbackCreatedServices(List<JSONObject> success) {
+        for (JSONObject jsonObject : success) {
+            JSONArray se = new JSONArray();
+            se.add(jsonObject.getString("name") + "_tcp");
+            se.add(jsonObject.getString("name") + "_udp");
+            GostDto deleteService = GostUtil.DeleteService(jsonObject.getLong("node_id"), se);
+            log.warn("回滚服务失败: {}", deleteService);
+        }
     }
 
 
