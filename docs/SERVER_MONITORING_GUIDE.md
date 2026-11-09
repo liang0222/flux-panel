@@ -638,3 +638,127 @@ docker logs --since 10m springboot-backend 2>&1 | grep -oE '"secret":"[^"*]{6,}"
 docker logs --since 10m springboot-backend 2>&1 | grep -oE '"secret":"[^"]*"' | sort -u
 # 期望：9e8b****cd88
 ```
+
+## 13. Java 堆外内存监控（glibc arena）
+
+### 13.1 为什么普通监控看不出来
+
+`docker stats` 与 `ps` 只给 RSS 总量。Java 的 RSS = 堆 + Metaspace + **glibc arena** + 线程栈 + DirectBuffer + 映射的 jar。堆没涨不代表 RSS 不涨；THP 关掉后 RSS 不降也不代表没有别的原因。**必须把 RSS 拆到 VMA 级别。**
+
+### 13.2 拆解 RSS 的标准流程
+
+```bash
+# 1) 取 PID
+P=$(docker inspect springboot-backend --format '{{.State.Pid}}')
+
+# 2) 总量与匿名/文件分布
+grep -E 'VmRSS|VmHWM|RssAnon|RssFile|VmData|Threads' /proc/$P/status
+cat /proc/$P/smaps_rollup
+
+# 3) 堆与 Metaspace（容器内无 jcmd，用 SIGQUIT）
+docker exec springboot-backend sh -c 'kill -3 1' >/dev/null 2>&1
+sleep 2
+docker logs --since 1m springboot-backend 2>&1 | grep -E 'garbage-first heap|Metaspace|class space'
+```
+
+SIGQUIT 会把 45+ 个线程栈写进容器日志（约 100–200 KB），偶尔用可以，不要写进定时任务。
+
+### 13.3 识别 glibc arena 的判据
+
+**核心特征：匿名可写、起始地址按 64 MB（0x4000000）对齐。**
+
+```bash
+P=$(docker inspect springboot-backend --format '{{.State.Pid}}')
+python3 /root/arena_stat.py "$P"
+```
+
+`arena_stat.py` 内容见 §13.7，输出示例：
+
+```
+vma_total   = 258
+anon_rw     = 100
+arena_segs  = 3
+arena_rss   = 140.2 MB
+non_arena   = 87.4 MB
+```
+
+**判读**：
+
+| `arena_segs` | 判断 |
+|---|---|
+| ≤ 5 | 正常（已设 `MALLOC_ARENA_MAX=2`） |
+| 10 – 30 | 偏高，注意趋势 |
+| > 40 | 异常，说明上限未生效或被人改回 |
+
+**注意 G1 堆保留区也会命中 64 MB 对齐**，所以 `arena_segs` 比真实 arena 数多 1–2；看**趋势**比看绝对值更有意义。
+
+### 13.4 四个必须区分的概念
+
+| 现象 | 含义 | 是否问题 |
+|---|---|---|
+| 堆 used 高但 RSS 不高 | 对象多但页已回收 | 否 |
+| 堆 used 低但 RSS 高 | 堆外占用（arena / 线程栈 / DirectBuffer） | **要看 arena 段数** |
+| RSS 涨但 `Pss_Anon` 不涨 | 共享库映射变化 | 否 |
+| RSS 缓慢爬升、arena 段数也涨 | arena 碎片累积 | **是** |
+| RSS 缓慢爬升、arena 段数不变 | 堆内缓存 / 类加载 | 查堆 |
+
+### 13.5 常设监控命令
+
+```bash
+P=$(docker inspect springboot-backend --format '{{.State.Pid}}')
+echo "$(date +%H:%M:%S) rss=$(awk '/VmRSS/{print $2}' /proc/$P/status)kB hwm=$(awk '/VmHWM/{print $2}' /proc/$P/status)kB thr=$(awk '/Threads/{print $2}' /proc/$P/status) arena=$(python3 /root/arena_stat.py $P | awk '/arena_segs|arena_rss/{printf "%s ", $3}')"
+```
+
+建议加进 crontab 每小时一条，写 CSV 便于画趋势。
+
+### 13.6 已知基线（2026-11-10 01:56 起）
+
+| 指标 | 基线值 |
+|---|---|
+| Java `VmRSS` | 329–336 MB（空闲，稳定期） |
+| Java `VmHWM` | 约 331–341 MB |
+| arena 段数 | 3 |
+| arena 实占 | 140.2 MB |
+| 堆 used | 46–72 MB |
+| Metaspace used | 61 MB |
+| 线程数 | 46–47 |
+| `docker stats` | 300–305 MiB |
+| agent `VmRSS` | 52–54 MB |
+| agent `Threads` | 12–13 |
+
+**与 01:51:57 之前的基线不可比**：之前 arena 段 51、实占 235.4 MB、`docker stats` 343.2 MiB。
+
+### 13.7 `arena_stat.py`（可直接部署）
+
+```python
+#!/usr/bin/env python3
+import sys, re
+pid = sys.argv[1]
+vmas, cur = [], None
+for line in open('/proc/%s/smaps' % pid):
+    m = re.match(r'^([0-9a-f]+)-([0-9a-f]+) (\S+) \S+ \S+ \S+\s*(.*)$', line)
+    if m:
+        if cur: vmas.append(cur)
+        cur = {'start': int(m.group(1), 16), 'perm': m.group(3),
+               'path': m.group(4).strip(), 'rss': 0}
+    elif cur is not None and line.startswith('Rss:'):
+        cur['rss'] = int(line.split()[1])
+if cur: vmas.append(cur)
+
+anon = [v for v in vmas if v['path'] == '' and 'w' in v['perm']]
+aligned = [v for v in anon if v['start'] % (64 * 1024 * 1024) == 0]
+print('vma_total   = %d' % len(vmas))
+print('anon_rw     = %d' % len(anon))
+print('arena_segs  = %d' % len(aligned))
+print('arena_rss   = %.1f MB' % (sum(v['rss'] for v in aligned) / 1024))
+print('non_arena   = %.1f MB' % ((sum(v['rss'] for v in anon) - sum(v['rss'] for v in aligned)) / 1024))
+```
+
+部署：`docker cp` 不需要，直接在宿主机放 `/root/arena_stat.py`，用容器 PID 调用即可（`/proc/<pid>/smaps` 宿主可见）。
+
+### 13.8 四条误判提醒
+
+1. **`docker stats` 是 cgroup 口径，含 page cache**，与 `VmRSS` 不等，差几十 MB 正常。
+2. **`VmHWM` 只增不减**，是历史峰值，不能用来判断"现在是否泄漏"。
+3. **arena 段数包含 G1 堆保留区**，绝对值为 3 时真实 arena 是 1–2 个，不要按"应该等于 2"去核。
+4. **换内核 / 改 THP 策略后旧基线全部作废**，必须重新采基线再谈涨跌。

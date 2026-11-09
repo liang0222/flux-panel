@@ -750,3 +750,55 @@ agent 二进制同时换成未加壳新构建（`sha256:91f3c258…`，32,092,31
 - 修复后**长期**（24 小时以上）FD / goroutine / RSS 趋势：截至本报告写作时新 agent 仅运行约 1.5 小时。
 - 其他节点（node 5 / 6 的 2.0.2 旧版、node 4 的 1.2.4）升级后是否同样收益：未升级，未测。
 - `failTimeout` 30 秒的实际 failover 效果：**代码已改但未下发到节点**，且单节点时 `go-gost/x/hop/hop.go:181-183` 短路使 fail filter 完全不生效。
+
+
+## 十一、第十轮：Java 进程堆外内存复核（2026-11-10 01:30–01:56）
+
+### 11.1 复核动机
+
+第九轮结束时 Java `VmRSS` 仍为 373–378 MB，而堆 used 只有 46.5 MB、Metaspace 61 MB。前几轮把差额归因于 THP，但换内核后 THP 已降为 `madvise`、`AnonHugePages = 0`，RSS 却没有回落——说明原归因不完整。
+
+### 11.2 实测手段
+
+容器内无 `jcmd`/`jstack`/`jmap`，宿主无 JDK。采用：
+
+1. `kill -3 <pid>` 取 SIGQUIT，从 stdout 读出 `garbage-first heap` 与 `Metaspace` 段。
+2. 逐段解析 `/proc/<pid>/smaps`（347 个 VMA），按「匿名可写 + 地址 64 MB 对齐」识别 glibc arena。
+
+### 11.3 结果
+
+| 组成 | 大小 |
+|---|---:|
+| G1 堆 RSS（`0xe0000000` 起） | 76.4 MB |
+| glibc arena（51 个对齐 VMA） | **235.4 MB** |
+| 其他匿名（类元数据、线程栈、DirectBuffer 等） | 93.0 MB |
+| file-backed（libjvm.so 16.2、classes.jsa 12.6、modules 2.2、libc 1.6、libsqlitejdbc 0.8） | 约 33 MB |
+| **合计 VmRSS** | **约 438 MB 口径 / 实测 373–378 MB（部分重叠计）** |
+
+容器 `nproc` = 8，`MALLOC_ARENA_MAX` 未设置 → glibc 默认上限 72 个 arena，实测 51 个。
+
+### 11.4 结论
+
+- **无堆泄漏**：堆 used 46.5 MB，`-Xmx512m` 远未打满。
+- **无 Metaspace 泄漏**：used 61 MB、committed 62 MB，`MaxMetaspaceSize=192m` 有 3 倍余量。
+- **主要可回收项是 glibc arena 碎片**，与业务对象无关。
+
+### 11.5 处理
+
+`springboot-backend/Dockerfile` 加 `ENV MALLOC_ARENA_MAX=2`，2026-11-10 01:51:57 上线。
+
+| 指标 | 上线前 | 上线后 |
+|---|---:|---:|
+| arena 段数 | 51 | 3 |
+| arena 实占 | 235.4 MB | 140.2 MB |
+| `VmRSS` | 373–378 MB | 329 MB |
+| `docker stats` | 343.2 MiB | 300.3 MiB |
+| 堆 used | 46.5 MB | 46.5 MB（不变） |
+| 健康状态 | healthy | healthy，`restarts=0`、`oom=false` |
+
+### 11.6 仍未处理（需决策）
+
+- `-Xmx512m` 保持不动（堆未打满，下调只牺牲并发余量）。
+- 未加 `-XX:NativeMemoryTracking`（需重启且额外占内存，本轮 smaps 已足够定性）。
+- 未加 `mem_limit`（避免硬限制掩盖问题或触发 OOMKilled）。
+- `install.sh` 的 `MEM_LIMIT` 缺省 1200MiB 与生产 drop-in 的 512MiB 不一致，未改。

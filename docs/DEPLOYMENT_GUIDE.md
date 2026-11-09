@@ -494,3 +494,104 @@ POST /api/v1/node/install  {"id": <nodeId>}
 ```
 
 在目标机上执行即可（`install.sh` 的 `update_flux_agent()` 会下载到 `flux_agent.new` → 停服务 → `mv` → `-V` 验证 → 启动）。
+
+
+## 9. 第十轮上线：glibc arena 限制（2026-11-10 01:51:57）
+
+### 9.1 变更内容
+
+`springboot-backend/Dockerfile` 新增 `ENV MALLOC_ARENA_MAX=2`。**只重建后端镜像，compose 文件、环境变量、端口、卷、网络、健康检查全部不变。**
+
+### 9.2 本地构建与推送
+
+```bash
+cd /root/v2.0.7-beta
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta   -f springboot-backend/Dockerfile springboot-backend
+# 确认变量进了镜像
+docker image inspect ahmadplayz721/flux-panel-backend:2.0.7-beta   --format '{{range .Config.Env}}{{println .}}{{end}}' | grep MALLOC_ARENA_MAX
+# 应输出 MALLOC_ARENA_MAX=2
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+```
+
+本次 manifest digest：`sha256:b2224ff1fe6912c7e784117be44f236b69cc0a98bf50e92e56bd259d60a89349`。
+
+### 9.3 生产更新
+
+```bash
+# 1. 备份 compose（即使本轮不改它）
+cd /root && cp docker-compose.yml /root/docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)
+
+# 2. 拉取并重建后端（服务名是 backend，容器名才是 springboot-backend）
+docker compose pull backend
+docker compose up -d backend
+
+# 3. 等健康
+sleep 40
+docker inspect springboot-backend --format 'health={{.State.Health.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}'
+```
+
+### 9.4 上线后必查
+
+```bash
+# 环境变量确实生效
+docker inspect springboot-backend --format '{{range .Config.Env}}{{println .}}{{end}}' | grep MALLOC_ARENA_MAX
+
+# 健康与双栈
+curl -s -o /dev/null -w "v4=%{http_code}
+" http://127.0.0.1:6365/flow/test
+curl -s -o /dev/null -w "v6=%{http_code}
+" -6 "http://[::1]:6365/flow/test"
+curl -s -o /dev/null -w "front=%{http_code}
+" http://127.0.0.1:6366/
+
+# 数据完整
+docker exec springboot-backend sh -c "sqlite3 /app/data/gost.db \
+  'pragma integrity_check; select count(*) from forward; select count(*) from node;'"
+
+# 节点重连（应看到节点 2/4/5/6）
+docker logs --since 5m springboot-backend 2>&1 | grep "连接建立成功"
+
+# arena 段数（应远小于 10）
+P=$(docker inspect springboot-backend --format '{{.State.Pid}}')
+grep -c '' /proc/$P/smaps >/dev/null && python3 -c "
+import re
+pid='$P'; v=[]; cur=None
+for line in open(f'/proc/{pid}/smaps'):
+    m=re.match(r'^([0-9a-f]+)-([0-9a-f]+) (\\S+) \\S+ \\S+ \\S+\\s*(.*)\$', line)
+    if m:
+        if cur: v.append(cur)
+        cur={'start':int(m.group(1),16),'perm':m.group(3),'path':m.group(4).strip(),'rss':0}
+    elif cur is not None and line.startswith('Rss:'):
+        cur['rss']=int(line.split()[1])
+if cur: v.append(cur)
+anon=[x for x in v if x['path']=='' and 'w' in x['perm']]
+al=[x for x in anon if x['start']%(64*1024*1024)==0]
+print('arena_segments=%d arena_rss_MB=%.1f' % (len(al), sum(x['rss'] for x in al)/1024))
+"
+
+# 日志脱敏仍生效
+docker logs --since 5m springboot-backend 2>&1 | grep -oE '"secret":"[^"]*"' | sort -u
+```
+
+### 9.5 本次上线实测结果
+
+| 项 | 结果 |
+|---|---|
+| 容器状态 | `Up (healthy)`、`restarts=0`、`oom=false` |
+| 启动时间 | `2026-11-09T17:51:57.689736757Z` |
+| `MALLOC_ARENA_MAX` | `2`（容器内生效） |
+| v4 / v6 / frontend | 200 / 200 / 200 |
+| 数据 | `integrity_check=ok`、`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4` |
+| 节点重连 | 2(2.0.2) / 4(1.2.4) / 5(2.0.2) / 6(2.0.2) 全部成功；3 本就整机离线 |
+| arena 段数 | 51 → **3** |
+| arena 实占 | 235.4 → **140.2 MB** |
+| `VmRSS` | 378,608 → **329,136 kB** |
+| `docker stats` | 343.2 → **300.3 MiB** |
+| 定时任务 | `端口流量采集完成：转发 193 条，写入 5 条，跳过 188 条（无新增流量）` |
+| 日志脱敏 | `"secret":"9e8b****cd88"`，明文计数 **0** |
+
+### 9.6 注意
+
+- 该变量写进 **Dockerfile**，不是 compose。因此**必须重建镜像**才会生效，改 compose 环境变量不会影响已有镜像层。
+- 若后续在 compose 里显式覆盖 `MALLOC_ARENA_MAX`，compose 的值优先。
+- 回滚见 `ROLLBACK_GUIDE.md` §12。

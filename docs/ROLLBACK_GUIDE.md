@@ -551,3 +551,75 @@ git revert --no-edit 859225a d7e63e8 d843617 7473a73 cc61535 e34660d 556b96d
 - **不要**用 `docker compose pull` 期望拉到旧版本（tag 指向 latest）。
 - **不要**在 agent 回滚后保留新 `gost.json`（格式兼容，但行为差异会让人误判）。
 - **不要**删除 `/root/agent_backup_20261109-230427/`，这是唯一的旧二进制来源。
+
+## 12. 回滚第十轮：glibc arena 限制
+
+### 12.1 回滚对象与目标值
+
+| 对象 | 当前值 | 回滚目标 |
+|---|---|---|
+| `springboot-backend/Dockerfile` | `ENV MALLOC_ARENA_MAX=2` | 删除该行 |
+| 生产后端镜像 | `sha256:b2224ff1…` | `sha256:5e83ee24…`（Hikari + get_port 守卫版） |
+
+**这次改动不涉及数据库、接口、compose、环境变量、卷、网络、端口，回滚不会动任何业务数据。**
+
+### 12.2 回滚方式 A：代码回滚后重建（推荐）
+
+```bash
+cd /root/v2.0.7-beta
+git revert --no-edit 264a035          # 只回退 Dockerfile 那一行
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta \
+  -f springboot-backend/Dockerfile springboot-backend
+docker image inspect ahmadplayz721/flux-panel-backend:2.0.7-beta \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' | grep MALLOC_ARENA_MAX
+# 应无输出
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+
+# 生产
+cd /root && cp docker-compose.yml /root/docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)
+docker compose pull backend && docker compose up -d backend
+```
+
+### 12.3 回滚方式 B：直接指回旧 digest（最快，不改代码）
+
+**注意 `docker compose pull` 会拉到 `latest`/tag 当前指向的镜像，不是旧版本。真正回退必须显式指定 digest。**
+
+```bash
+# 1) 拉旧 digest
+docker pull ahmadplayz721/flux-panel-backend@sha256:5e83ee2452e2d85e570f2a1e45913e944112c81254e0093cf0b59a8a9c83d15a
+
+# 2) 打回 tag
+docker tag ahmadplayz721/flux-panel-backend@sha256:5e83ee24... \
+           ahmadplayz721/flux-panel-backend:2.0.7-beta
+
+# 3) 强制重建（必须 --force-recreate，否则 compose 认为镜像没变）
+cd /root
+docker compose up -d --force-recreate backend
+```
+
+### 12.4 回滚后必查
+
+```bash
+docker inspect springboot-backend --format 'health={{.State.Health.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}'
+curl -s -o /dev/null -w "v4=%{http_code}\n" http://127.0.0.1:6365/flow/test
+curl -s -o /dev/null -w "v6=%{http_code}\n" -6 "http://[::1]:6365/flow/test"
+curl -s -o /dev/null -w "front=%{http_code}\n" http://127.0.0.1:6366/
+docker exec springboot-backend sh -c "sqlite3 /app/data/gost.db 'pragma integrity_check; select count(*) from forward;'"
+docker logs --since 5m springboot-backend 2>&1 | grep "连接建立成功"
+```
+
+预期：`healthy`、`restarts=0`、三个 200、`ok`、`193`、节点 2/4/5/6 重连。
+
+回滚后内存会回到 **arena 51 段 / 235 MB / RSS 373–378 MB / docker stats 343 MiB**，属预期。
+
+### 12.5 代价说明
+
+- 回滚后 Java RSS 会**回升约 50 MB**（空闲态）到 **约 120 MB**（压力态）。
+- 不会影响功能、性能与稳定性；arena 碎片只是内存占用问题。
+- 若回滚是因为"怀疑 arena 限制导致变慢"，请先按 `PERFORMANCE_COMPARISON.md` 第十轮的方法复测——历史上三次压测方向不一致，单次变慢很可能是噪声或 JIT 冷启动。
+
+### 12.6 禁止事项
+
+- **不要**用 `docker compose down` 再 `up`（会中断全部节点连接，且不解决版本问题）。
+- **不要**在没有备份 `docker-compose.yml` 的情况下修改镜像 tag。
+- **不要**通过 `mem_limit` 压低容器内存来"解决" arena 问题——那只会把问题变成 OOMKilled。

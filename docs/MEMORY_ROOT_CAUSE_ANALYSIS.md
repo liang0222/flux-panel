@@ -1348,3 +1348,61 @@ defer 是后进先出，所以 `wg.Wait()` 排在 `cancel()` **之前**。即使
 | 新二进制 | `EOF at 3.0s`（删除发生在第 3 秒） |
 
 实验方法：`gost` 自带 REST API `DELETE /config/services/<name>`，客户端每 0.5 秒发一次心跳并读回，记录断开时刻。详见《CODE_CHANGELOG.md》§19.1。
+
+
+## 17. 第十轮：Java 堆外内存的第二个来源——glibc arena
+
+### 17.1 为什么之前一直没定性
+
+前几轮对 Java 内存的结论是「堆没泄漏、差额由 THP 造成」。这个结论在 THP 仍为 `always` 时成立，但 2026-11-10 00:38 换内核后 THP 变成 `madvise`，`AnonHugePages` 归零，**RSS 并没有跟着掉下来**（Java 仍 363–378 MB）。说明还有第二个来源。
+
+### 17.2 证据链
+
+容器内没有 `jcmd` / `jstack` / `jmap`（`/opt/java/openjdk/bin/` 只有 `java jfr jrunscript jwebserver keytool rmiregistry`），宿主也没装 JDK，因此改用 `kill -3` 取 SIGQUIT：
+
+- `garbage-first heap total 80896K, used 46509K`
+- `Metaspace used 61026K, committed 61696K, reserved 229376K`
+- `class space used 6910K`
+- 线程 45 个
+
+堆 used + Metaspace ≈ 108 MB，而 `smaps_rollup` 的 `RssAnon 347,264 kB` → **约 240 MB 在堆外**。
+
+逐段解析 `/proc/<pid>/smaps`（347 个 VMA）：
+
+| 分类 | VMA 数 | RSS |
+|---|---:|---:|
+| 匿名可写（anon rw） | 145 | 328.4 MB |
+| 其中：按 64 MB 地址对齐（glibc arena 特征） | **51** | **235.4 MB** |
+| 其中：非对齐匿名 | 94 | 93.0 MB |
+| file-backed | — | 约 33 MB |
+
+关键旁证：
+
+- G1 堆保留区 `0xe0000000` 的 VMA 有 77.0 MB 虚拟、**76.4 MB RSS**；紧跟其后的 `0xe4d00000` 有 433 MB 虚拟、**RSS 为 0**（保留未 touch）。
+- 大量 63.9 MB 的 arena 预留 VMA RSS 为 0 —— 典型「预留了但没用到」。
+- 容器 `nproc` = 8，`MALLOC_ARENA_MAX` 未设置 → glibc 默认上限 `8 × (1 + 8) = 72` 个 arena，实测开了 51 个。
+
+### 17.3 因果
+
+不是应用对象堆积（堆 used 46.5 MB 远低于 `-Xmx512m`），而是 **glibc 为每个并发线程分配独立 arena，线程生命周期结束后 arena 不归还 OS**。Tomcat 线程池在流量波动中扩缩，每个新线程可能落到新 arena，于是 arena 数量与 RSS 单调上行：
+
+- 空闲：373.8 MB
+- 1200×6 轮压测后：**510.1 MB**（涨 136 MB，涨幅全部落在 arena 段）
+
+### 17.4 修复与验证
+
+`ENV MALLOC_ARENA_MAX=2`（见 `springboot-backend/Dockerfile`）：
+
+| 指标 | 对照 | `MALLOC_ARENA_MAX=2` |
+|---|---:|---:|
+| 空闲 RSS | 373.8 MB | 345.7 MB |
+| 压测后 RSS | 510.1 MB | 393.6 MB |
+| arena 段数 | 52 | 5 |
+| arena 实占 | 269.8 MB | 164.8 MB |
+| 堆 used | 46.5 MB | 46.5 MB（不变） |
+
+上线后生产：arena 段 **51 → 3**、实占 **235.4 → 140.2 MB**、`docker stats` **343.2 → 300.3 MiB**、`VmRSS 329,136 kB`。
+
+### 17.5 方法论
+
+**「堆没涨」不等于「进程没涨」，「THP 关掉后没降」不等于「没有别的原因」。** 只看 `jstat`/堆 dump 会完全漏掉这一类问题；必须把 `smaps` 的匿名段按地址对齐特征分类，才能把 240 MB 定位到 glibc。
