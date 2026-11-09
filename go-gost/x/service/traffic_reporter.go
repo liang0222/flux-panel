@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -53,6 +54,26 @@ type TrafficReportItem struct {
 	N string `json:"n"` // 服务名（name缩写）
 	U int64  `json:"u"` // 上行流量（up缩写）
 	D int64  `json:"d"` // 下行流量（down缩写）
+}
+
+// maskSecretInURL 把 URL 查询串里的 secret 参数值替换为掩码。
+// secret 是节点身份凭据，err 里带上完整 URL 会把明文写进 journald 长期留存。
+// 保留首尾各 4 位便于比对是哪一份配置；解析失败时返回不含查询串的占位文案。
+func maskSecretInURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(URL 解析失败)"
+	}
+	q := u.Query()
+	if v := q.Get("secret"); v != "" {
+		if len(v) <= 8 {
+			q.Set("secret", "****")
+		} else {
+			q.Set("secret", v[:4]+"****"+v[len(v)-4:])
+		}
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func SetHTTPReportURL(addr string, secret string) {
@@ -114,7 +135,9 @@ func sendBatchTrafficReport(ctx context.Context, reportItems []TrafficReportItem
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("发送HTTP请求失败: %v", err)
+		// err 会带上完整请求 URL（含 secret），这里替换成脱敏后的 URL，
+		// 否则失败日志会把节点凭据明文写进 journald。
+		return false, fmt.Errorf("发送HTTP请求失败: %s", strings.Replace(err.Error(), req.URL.String(), maskSecretInURL(req.URL.String()), 1))
 	}
 	defer resp.Body.Close()
 
@@ -189,7 +212,9 @@ func sendConfigReport(ctx context.Context) (bool, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("发送HTTP请求失败: %v", err)
+		// err 会带上完整请求 URL（含 secret），这里替换成脱敏后的 URL，
+		// 否则失败日志会把节点凭据明文写进 journald。
+		return false, fmt.Errorf("发送HTTP请求失败: %s", strings.Replace(err.Error(), req.URL.String(), maskSecretInURL(req.URL.String()), 1))
 	}
 	defer resp.Body.Close()
 
