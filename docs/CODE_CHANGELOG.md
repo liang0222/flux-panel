@@ -817,3 +817,76 @@ Hub 上仍是新版本。若要连 Hub 一起回退，需重新 push 旧镜像�
 | 修改前 | `exp = now/1000 + 1`，只做两次 `assertTrue` |
 | 修改后 | `exp = now/1000 + 3`，两次 `assertTrue` 后等待真正过期，再断言 `assertFalse` |
 | 原因 | 原用例写死 1 秒且不验证过期后行为，线程跨秒边界即间歇失败（实测 5 次中失败 2 次），与本类要验证的缓存行为无关；改后连续 3 次全通过，且补上了「缓存命中也不能放过过期 token」这一真正要断言的语义 |
+
+---
+
+## 19. 第六轮修复（2026-11-09 23:00 – 2026-11-10 00:30，已部署）
+
+本轮由用户 m04487 / m05020 授权：「直接开始改 Transport() 的代码修复」「总之把你现在知道的所有问题 全部检查修复」。
+
+### 19.1 Go agent：`Transport` 响应 context 取消（提交 `556b96d`）
+
+| 项 | 内容 |
+|---|---|
+| 问题 | 面板删除端口/隧道后，已建立连接继续转发真实流量（生产实测 82 条残留连接仍跑 64 KB/s），要等对端断开或 keepalive 超时（`tcp_keepalive_time=600` + `tcp_retries2=15`，10~15 分钟以上）才死 |
+| 根因 1 | `go-gost/x/internal/net/transport.go` 的 `Transport()` 用 `io.CopyBuffer` 双向搬运，**完全不接收 ctx**，`relayHandler.Close()` 里的 `h.cancel()` 传不进去 |
+| 根因 2 | `go-gost/x/service/service.go` 的 `Serve()` 里 `defer cancel()` 写在 `defer wg.Wait()` 之前，**LIFO 导致 `wg.Wait()` 先执行**，cancel 永远等不到 |
+| 改动 | `transport.go` 保留 `Transport()` 作兼容入口（委托 `TransportContext(context.Background(), ...)`），新增 `TransportContext(ctx, rw1, rw2)`：`errc := make(chan error, 2)`（**容量必须 2**，否则 ctx 分支提前返回时另一个 goroutine 永久阻塞），`select` 监听 `ctx.Done()`，触发时 `closeReadWriter` 关两端 |
+| 改动 | `service.go` 改为 `defer func() { cancel(); wg.Wait() }()` |
+| 改动 | 5 个调用点改为 `xnet.TransportContext(ctx, conn, cc)`：`handler/relay/forward.go:117`、`relay/connect.go:202`、`relay/entrypoint.go:116`、`handler/forward/local/handler.go:221`、`handler/forward/remote/handler.go:263`。**其余 20+ 调用点未改**，行为不变 |
+| 测试 | 新增 `go-gost/x/internal/net/transport_test.go`（5 例）、`go-gost/x/service/service_close_test.go`（2 例） |
+| 验证 | `go test -race -count=3 ./internal/net/ ./service/` 两包 `ok`；x 模块 `go test ./...` 全量无 FAIL；**A/B 对照**：旧二进制删除后 `STILL ALIVE after 20s`，新二进制 `EOF at 3.0s` |
+| 附带 | `go-gost/x/go.mod` / `go.sum` 补 `gopsutil/v3` 的 `go.sum` 条目与 `tklauser/*` 间接依赖 —— 父提交 `939fc55` 在默认 `-mod=readonly` 下**根本编译不过**，属必要修复 |
+
+### 19.2 后端三处质量问题（提交 `cc61535`）
+
+| 文件 | 改动 |
+|---|---|
+| `GostUtil.java:123` | `failTimeout` `600000000000L` → `30000000000L`（600 秒 → 30 秒）；同步改 `GostUtilChainConfigTest.java` 断言 |
+| `WebSocketInterceptor.java:45` | 节点握手日志不再打印 `secret` 明文（原 `System.out.println` 直接进容器 stdout/journald） |
+| `TunnelServiceImpl.java`（5 处）、`SpeedLimitServiceImpl.java`（1 处） | `System.out.println(...)` → `log.warn(...)`，补 `@Slf4j` |
+| `IpUtils.java` | `e.printStackTrace()` → `log.warn`，**同时修掉一个 NPE**：原 `InetAddress inet = null` 在异常分支仍被解引用 |
+
+### 19.3 后端第二批缺陷修复（提交 `7473a73`）
+
+| 文件 | 改动 | 性质 |
+|---|---|---|
+| `TunnelServiceImpl.java` | `createTunnel` 的「无中间跳直连出口」分支原来调 `isError(gostDto)`，而 `isError` 是**空方法** → `AddChains` 失败时隧道已落库、chain 未建、接口仍返回 `R.ok()`。改为与「指向第一跳」分支一致的失败回滚；删除空方法 | 功能性 bug（静默失败） |
+| `ForwardServiceImpl.java` | `createForward` 失败回滚把 `return R.err(...)` 写在 `for (success)` 循环体内 → 多入口节点时只回滚第一个，其余泄漏在节点上。改为先遍历全部回滚再统一 return | 功能性 bug（部分回滚） |
+| `FlowController.java:81`、`WebSocketServer.java:48` | 无界 `ConcurrentHashMap<String, AESCrypto>` → 64 项 LRU（`LinkedHashMap` + `removeEldestEntry`） | 内存（节点删除后 entry 永驻） |
+| `CheckGostConfigAsync.java` | 新增 `hasParts()` / `parseId()`；`tls` 分支要求 ≥2 段、`tcp` 分支要求 ≥4 段；`getById` 前先校验 id 合法 | 健壮性（原会 `IndexOutOfBoundsException`，被 `safeExecute` 吞掉） |
+| `TunnelServiceImpl.java` / `ForwardServiceImpl.java` | 删除各一个**零调用**的 `performTcpPingDiagnosis`（与 `...WithConnectionCheck` 方法体完全相同） | 死代码 |
+
+### 19.4 请求日志脱敏（提交 `d843617`）
+
+| 项 | 内容 |
+|---|---|
+| 问题 | 生产日志里每条 `uploadFlowData` 都输出节点 `secret` 明文（等同登录凭据），进入容器日志与 journald |
+| 改动 | `LogAspect.java` 新增 `SENSITIVE_JSON_FIELD` 正则（`secret/password/token/oldPassword/newPassword`）与 `maskSensitive(String)`：值 ≤8 位整体 `****`，否则保留首尾各 4 位（`9e8b****cd88`）；`Matcher.quoteReplacement` 防注入；异常时原样返回。两处调用点改为 `truncateForLog(maskSensitive(getRequestParams(joinPoint)))` |
+| 测试 | 新增 `LogAspectMaskTest`（6 例，反射调 private 方法） |
+| 验证 | `Tests run: 101, Failures: 0, Errors: 0`；生产 `docker logs \| grep -oE '"secret":"[^"]*"'` 全部脱敏，明文计数 **0** |
+
+### 19.5 前端 24 个 lint error（提交 `d7e63e8`）
+
+`npx eslint src --ext .ts,.tsx` 原为 `6379 problems (24 errors, 6355 warnings)`，其中 6355 条 `prettier/prettier` 格式警告**未动**（避免整文件重排）。
+
+| 类别 | 位置 | 修法 |
+|---|---|---|
+| `react-hooks/rules-of-hooks` ×1 | `forward.tsx:1165` `SortableForwardCard` | `if (!forward \|\| !forward.id) return null;` 原写在 `useSortable()` **之前** → 条件调用 Hook，数据由空变非空时抛 `Rendered more hooks than during the previous render`。改为先 `useSortable({ id: forward?.id ?? -1 })` 再提前 return |
+| `react/no-unescaped-entities` ×18 | `forward/limit/node/tunnel/user` 五个页面 | 确认弹窗里的裸 `"` 改为 `&quot;` |
+| `jsx-a11y/*` ×5 | `layouts/admin.tsx:258`、`forward.tsx` 两处、`dashboard.tsx:1082/1090` | 遮罩层加 `role="presentation"` + `aria-hidden`；地址行加 `role="button"` + `tabIndex` + `onKeyDown`（Enter/Space）；`dashboard` 的 `<code onClick>` 改为 `<span>`（`<code>` 隐式 non-interactive，加 role 仍报错；`font-mono` 已在类名里，视觉不变） |
+
+**验证**：`eslint --quiet` → **0 problems**；`tsc --noEmit` EXIT=0；`vite build` `✓ built in 11.46s`。
+
+### 19.6 部署记录
+
+| 时间（CST） | 对象 | digest / 结果 |
+|---|---|---|
+| 2026-11-09 23:05:19 | agent 二进制 | `sha256:91f3c258…`，32,092,312 B，未加壳；RSS 110–123 MB → 56–59 MB |
+| 2026-11-09 23:32:31 | 后端镜像 | `sha256:580f0784…` |
+| 2026-11-09 23:44 | journald 上限 | 379.3 MB → 180.1 MB |
+| 2026-11-10 00:09:43 | 后端镜像 | `sha256:607a3beb…` |
+| 2026-11-10 00:16 | 后端镜像 | `sha256:b0ee363d…` |
+| 2026-11-10 00:25:02 | 前端镜像 | `sha256:02d1ee31…` |
+
+全部 `Restarts=0`、`ExitCode=0`、`OOMKilled=false`；`v4=200`、`v6=200`、`frontend=200`；数据量不变（`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4 / user 1`），`pragma integrity_check = ok`。

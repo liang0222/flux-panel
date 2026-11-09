@@ -1,15 +1,15 @@
 # 交接说明：Flux Panel 隧道断流 / 旧连接残留修复
 
 > 给下一个会话看的进度快照。读完这一页即可继续，不需要回看原对话。
-> 最后更新：2026-11-09 23:50（Asia/Shanghai）
+> 最后更新：2026-11-10 00:35（Asia/Shanghai）
 > 上一个交接（端口流量排行功能）：`docs/port-flow-ranking/handoff.md`
 
 ---
 
 ## 一句话现状
 
-**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端三处质量问题已修复并上线；journald 上限已安装。**
-剩余：`failTimeout` 新值尚未下发到节点、其他节点 agent 仍是旧二进制、多节点 failover 未配置、八份交付文档未同步本轮改动。
+**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端两批缺陷修复 + 日志脱敏 + 前端 24 个 lint error 全部修复并上线；journald 上限已安装。**
+剩余：`failTimeout` 新值尚未下发到节点（需先配多节点才有意义）、其他节点 agent 仍是旧二进制、node 5 假在线、八份交付文档未同步本轮改动。
 
 ---
 
@@ -18,7 +18,7 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `/root/v2.0.7-beta` |
-| 当前分支 | `fix/transport-ctx-cancel`（HEAD `f1bbf5b`，已 push） |
+| 当前分支 | `fix/transport-ctx-cancel`（HEAD `d7e63e8`，已 push） |
 | GitHub | `https://github.com/liang0222/flux-panel`，账号 `liang0222` |
 | GitHub token | 用户已在会话中提供（形如 `ghp_...`）；`gh` 需 `GH_TOKEN=` 前缀，或写进 push URL。**不要把 token 写进仓库文件——GitHub push protection 会拦截** |
 | Docker Hub | 账号 `ahmadplayz721`；token 形如 `dckr_pat_...`，由用户提供，**不入库** |
@@ -62,7 +62,40 @@
 
 **验证**：Maven 全量 `Tests run: 95, Failures: 0, Errors: 0, Skipped: 0`；镜像内 `javap` 反编译确认 `ldc2_w // long 30000000000l`，`WebSocketInterceptor` 格式串中 `secret: ` 出现 0 次。
 
-### 2.3 生产部署（全部已生效）
+### 2.3 后端第二批缺陷修复（提交 `7473a73`）
+
+| 文件 | 改动 | 性质 |
+| --- | --- | --- |
+| `TunnelServiceImpl.java` | `createTunnel` 的「无中间跳直连出口」分支原来调 `isError(gostDto)`，而 `isError` 是**空方法** → `AddChains` 失败时隧道已落库、chain 未建、接口仍返回 `R.ok()`。改为与「指向第一跳」分支一致的失败回滚；删除空方法 | 功能性 bug（静默失败） |
+| `ForwardServiceImpl.java` | `createForward` 失败回滚把 `return R.err(...)` 写在 `for (success)` 循环体内 → 多入口节点时只回滚第一个，其余泄漏在节点上。改为先遍历全部回滚再统一 return | 功能性 bug（部分回滚） |
+| `FlowController.java:81`、`WebSocketServer.java:48` | 无界 `ConcurrentHashMap<String, AESCrypto>` → 64 项 LRU（`LinkedHashMap` + `removeEldestEntry`），与 `JwtUtil` 既有写法一致 | 内存（节点删除后 entry 永驻） |
+| `CheckGostConfigAsync.java` | 新增 `hasParts()` / `parseId()`；`tls` 分支要求 ≥2 段、`tcp` 分支要求 ≥4 段；`getById` 前先校验 id 合法 | 健壮性（原会 `IndexOutOfBoundsException`，被 `safeExecute` 吞掉） |
+| `TunnelServiceImpl.java` / `ForwardServiceImpl.java` | 删除各一个**零调用**的 `performTcpPingDiagnosis`（与 `...WithConnectionCheck` 方法体完全相同） | 死代码 |
+
+### 2.4 请求日志脱敏（提交 `d843617`）
+
+生产日志里每条 `uploadFlowData` 都输出节点 `secret` 明文（等同登录凭据）。`LogAspect` 新增：
+
+- `SENSITIVE_JSON_FIELD = Pattern.compile("([\"'](?:secret|password|token|oldPassword|newPassword)[\"']\\s*:\\s*\")([^\"]*)(\")", CASE_INSENSITIVE)`
+- `maskSensitive(String)`：值 ≤8 位整体 `****`，否则保留首尾各 4 位（`9e8b****cd88`）；`Matcher.quoteReplacement` 防注入；异常时原样返回。
+- 两处调用点改为 `truncateForLog(maskSensitive(getRequestParams(joinPoint)))`。
+- 新增 `LogAspectMaskTest`（6 例，反射调 private 方法）。
+
+**验证**：`Tests run: 101, Failures: 0, Errors: 0`；生产 `docker logs | grep -oE '"secret":"[^"]*"'` 全部脱敏，明文计数 0。
+
+### 2.5 前端 24 个 lint error（提交 `d7e63e8`）
+
+`npx eslint src --ext .ts,.tsx` 原为 `6379 problems (24 errors, 6355 warnings)`，其中 6355 条 `prettier/prettier` 格式警告**未动**（避免整文件重排）。24 个 error 分三类，全部修完：
+
+| 类别 | 位置 | 修法 |
+| --- | --- | --- |
+| `react-hooks/rules-of-hooks` ×1 | `forward.tsx:1165` `SortableForwardCard` | `if (!forward \|\| !forward.id) return null;` 原写在 `useSortable()` **之前** → 条件调用 Hook，数据由空变非空时抛 `Rendered more hooks than during the previous render`。改为先 `useSortable({ id: forward?.id ?? -1 })` 再提前 return |
+| `react/no-unescaped-entities` ×18 | `forward/limit/node/tunnel/user` 五个页面 | 确认弹窗里的裸 `"` 改为 `&quot;` |
+| `jsx-a11y/*` ×5 | `layouts/admin.tsx:258`、`forward.tsx` 两处、`dashboard.tsx:1082/1090` | 遮罩层加 `role="presentation"` + `aria-hidden`；地址行加 `role="button"` + `tabIndex` + `onKeyDown`（Enter/Space）；`dashboard` 的 `<code onClick>` 改为 `<span>`（`<code>` 隐式 non-interactive，加 role 仍报错；`font-mono` 已在类名里，视觉不变） |
+
+**验证**：`eslint --quiet` → **0 problems**；`tsc --noEmit` EXIT=0；`vite build` `✓ built in 11.46s`。
+
+### 2.6 生产部署（全部已生效）
 
 | 时间 | 变更 | 验证 |
 | --- | --- | --- |
@@ -70,8 +103,11 @@
 | 23:32:31 | 后端镜像 `sha256:580f0784…` | `Up (healthy)`、`Restarts=0`、`ExitCode=0`；数据 `forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4 / user 1`，`integrity_check = ok`；`v4=200 v6=200 frontend=200`；4 个节点全部重连 |
 | 23:44 | journald 上限 200 M 安装到 `/etc/systemd/journald.conf.d/99-flux.conf` | **379.3 MB → 180.1 MB** |
 | — | GitHub Release `2.0.7-beta-perf` 资产换成新二进制 | `gost-amd64` 32,092,312 B、`gost-arm64` 30,146,712 B，sha256 与本地构建一致（可复现） |
+| 00:09:43 | 后端镜像 `sha256:607a3beb…`（隧道静默失败、回滚不全、无界缓存、死代码） | `Up (healthy)`、`Restarts=0`；`v4=200 v6=200 frontend=200`；节点 6/2/4 全部重连；采集任务 `转发 193 条，写入 10 条` |
+| 00:16 | 后端镜像 `sha256:b0ee363d…`（请求日志脱敏） | `docker logs \| grep -oE '"secret":"[^"]*"'` 全部为 `9e8b****cd88`，明文计数 **0** |
+| 00:25:02 | 前端镜像 `sha256:02d1ee31…`（Hook 顺序、a11y、JSX 转义） | `Up`、`Restarts=0`；`v4=200 v6=200`；线上 chunk `dashboard-D6OLUzFC.js` 含 `role:oe(S.inIp)`、`forward-CsoQnpxe.js` 含 3 处 `onKeyDown` |
 
-**备份位置**：`/root/agent_backup_20261109-230427/`（`flux_agent.bak` / `gost.json.bak` / `config.json.bak`）、`/root/docker-compose.yml.bak-20261109-233154`。
+**备份位置**：`/root/agent_backup_20261109-230427/`（`flux_agent.bak` / `gost.json.bak` / `config.json.bak`）、`/root/docker-compose.yml.bak-20261109-233154`、`/root/docker-compose.yml.bak-20261110-002444`。
 
 ---
 
@@ -97,7 +133,7 @@
 
 6. **`64.83.10.191:1000` 现在是「端口 OPEN 但 TLS 握手失败」**（`ssl3_read_n: unexpected eof`，读到 0 字节，无证书）。即 relay 服务半死。该 IP **不在 node 表**，面板管不到。
 
-7. **八份交付文档未同步本轮改动**：`docs/` 下 8 份文档（`MEMORY_AUDIT_REPORT.md` 等）里 `TransportContext` 出现 0 次，本轮改动未写入。
+7. **八份交付文档未同步本轮改动**：`docs/` 下 8 份文档（`MEMORY_AUDIT_REPORT.md` 等）里 `TransportContext` 出现 0 次，本轮改动未写入。`docs/HANDOFF.md` 与 `docs/CODE_CHANGELOG.md` 已同步。
 
 ### P2 — 观察中
 
@@ -165,6 +201,7 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 | agent 二进制 | `systemctl stop flux_agent && cp /root/agent_backup_20261109-230427/flux_agent.bak /etc/flux_agent/flux_agent && systemctl start flux_agent` |
 | 后端镜像 | `cp /root/docker-compose.yml.bak-20261109-233154 /root/docker-compose.yml` 后把 backend 镜像 tag 指回旧 digest，`docker compose up -d backend` |
 | journald | `rm /etc/systemd/journald.conf.d/99-flux.conf && systemctl restart systemd-journald` |
-| 代码 | `git revert cc61535 e34660d 556b96d`（三个提交相互独立，可单独回滚） |
+| 前端镜像 | 同后端，`docker compose up -d frontend` 前把 tag 指回旧 digest |
+| 代码 | `git revert d7e63e8 d843617 7473a73 cc61535 e34660d 556b96d`（各提交相互独立，可单独回滚） |
 
-旧后端镜像 digest：`sha256:c42978b6…`（第五轮，2026-11-01 上线）；更早 `sha256:0a4d617a…`。
+旧后端镜像 digest：`sha256:b0ee363d…`（脱敏版，当前）→ `sha256:607a3beb…` → `sha256:580f0784…` → `sha256:c42978b6…`（第五轮，2026-11-01）→ `sha256:0a4d617a…`。
