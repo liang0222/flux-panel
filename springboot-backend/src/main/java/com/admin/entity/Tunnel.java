@@ -1,13 +1,8 @@
 package com.admin.entity;
 
-import java.io.Serializable;
 import java.math.BigDecimal;
-import java.util.List;
 
-import com.admin.common.dto.ChainNodesItems;
-import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
-import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 

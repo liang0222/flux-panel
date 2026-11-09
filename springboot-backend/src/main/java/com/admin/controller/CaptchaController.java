@@ -1,19 +1,13 @@
 package com.admin.controller;
 
 import cloud.tianai.captcha.application.ImageCaptchaApplication;
-import cloud.tianai.captcha.common.constant.CaptchaTypeConstant;
 import cloud.tianai.captcha.common.response.ApiResponse;
 import cloud.tianai.captcha.application.vo.ImageCaptchaVO;
-import cloud.tianai.captcha.validator.common.model.dto.ImageCaptchaTrack;
-import cloud.tianai.captcha.validator.common.model.dto.MatchParam;
 import com.admin.common.dto.CaptchaVerifyDto;
 import com.admin.common.lang.R;
 import com.admin.entity.ViteConfig;
-import com.admin.service.ViteConfigService;
-import com.alibaba.fastjson.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 import cloud.tianai.captcha.application.vo.CaptchaResponse;
 

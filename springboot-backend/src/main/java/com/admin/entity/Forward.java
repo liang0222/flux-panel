@@ -1,12 +1,7 @@
 package com.admin.entity;
 
-import java.io.Serializable;
-import java.util.List;
 
-import com.admin.common.dto.ForwardPortDto;
-import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
-import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 

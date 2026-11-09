@@ -1,7 +1,6 @@
 package com.admin.common.dto;
 
 import com.admin.entity.UserTunnel;
-import com.admin.service.impl.ForwardServiceImpl;
 import lombok.Data;
 
 @Data

@@ -11,7 +11,6 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
-import static cloud.tianai.captcha.common.constant.CommonConstant.DEFAULT_SLIDER_IMAGE_TEMPLATE_PATH;
 
 @Component
 @RequiredArgsConstructor

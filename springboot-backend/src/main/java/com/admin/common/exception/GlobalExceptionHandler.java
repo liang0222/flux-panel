@@ -2,7 +2,6 @@ package com.admin.common.exception;
 
 import com.admin.common.lang.R;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.catalina.connector.ClientAbortException;
 import org.springframework.validation.BindingResult;
 import org.springframework.validation.ObjectError;
 import org.springframework.web.bind.MethodArgumentNotValidException;

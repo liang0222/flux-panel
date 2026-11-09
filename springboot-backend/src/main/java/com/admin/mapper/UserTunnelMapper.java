@@ -4,7 +4,6 @@ import com.admin.entity.UserTunnel;
 import com.admin.common.dto.UserTunnelWithDetailDto;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.apache.ibatis.annotations.Param;
-import org.apache.ibatis.annotations.Select;
 
 import java.util.List;
 
