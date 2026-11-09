@@ -1,14 +1,14 @@
 # 交接说明：Flux Panel 隧道断流 / 旧连接残留修复
 
 > 给下一个会话看的进度快照。读完这一页即可继续，不需要回看原对话。
-> 最后更新：2026-11-10 03:20（Asia/Shanghai）
+> 最后更新：2026-11-10 03:55（Asia/Shanghai）
 > 上一个交接（端口流量排行功能）：`docs/port-flow-ranking/handoff.md`
 
 ---
 
 ## 一句话现状
 
-**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端五批缺陷修复 + 前后端双份日志脱敏 + 前端 24 个 lint error 全部修复并上线；Java 堆外内存定性完成并已回收约 50–120 MB；journald 上限已安装；九份交付文档已同步。**
+**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端七批缺陷修复 + 前后端双份日志脱敏 + 前端 24 个 lint error 全部修复并上线；Java 堆外内存定性完成并使 `docker stats` 从 343 MiB 降到约 210–230 MiB；journald 上限已安装；九份交付文档已同步。**
 剩余：`failTimeout` 新值尚未下发到节点（需先配多节点才有意义）、其他节点 agent 仍是旧二进制、node 5 假在线、node 3 整机离线。
 
 ---
@@ -18,7 +18,7 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `/root/v2.0.7-beta` |
-| 当前分支 | `fix/transport-ctx-cancel`（HEAD `851aedc`） |
+| 当前分支 | `fix/transport-ctx-cancel`（HEAD `124a96e`，已与 `feat/port-traffic-ranking` fast-forward 同步） |
 | GitHub | `https://github.com/liang0222/flux-panel`，账号 `liang0222` |
 | GitHub token | 用户已在会话中提供（形如 `ghp_...`）；`gh` 需 `GH_TOKEN=` 前缀，或写进 push URL。**不要把 token 写进仓库文件——GitHub push protection 会拦截** |
 | Docker Hub | 账号 `ahmadplayz721`；token 形如 `dckr_pat_...`，由用户提供，**不入库** |
@@ -189,6 +189,21 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 
 `ResetFlowAsync.user()` 把 `userTunnel` 查询放在 `chainTunnel` 内层循环里（N 个入口 = N 次相同 SQL），且用会抛异常的 `getOne`。异常被外层 catch 吞掉后，**后续所有过期用户与隧道整批漏处理**。改为循环外查一次 + `getOne(wrapper, false)`。
 
+### 2.12 配置上报的孤立项清理改用批量查询（提交 `124a96e`）
+
+`CheckGostConfigAsync.cleanOrphanedServices` / `cleanOrphanedChains` 原实现是「每个 service/chain 各查一次库」。节点每 10 分钟上报一次完整配置，当前每节点约 166 个 service，等于**每轮上百条单行 SELECT**。
+
+改为先把名字里的 id 收集成集合，用 `listByIds` 一次取回真实存在的 id，再逐条判定；查询次数固定为最多两条。判定逻辑拆成 `findOrphanServices` / `findOrphanChains`，脱离 WebSocket 可单测。
+
+**安全边界**：批量查询失败时返回 `null` 并**整轮跳过清理**，而不是返回空集合——否则一次数据库抖动会让所有 service 都被判成孤立并对节点下发上百条删除命令。
+
+新增 `CheckGostConfigAsyncOrphanTest` 6 例（保留/删除判定、批量只查一次、查询失败不删、名字不合规不发查询）。全量 `mvn test` **112 例全过**。已上线（03:50:34，镜像 `sha256:12d65638…`），上线后无孤立项可删，日志 0 条，数据量与完整性不变。
+
+### 2.13 交付链路两处修正（提交 `fc45e60`，Dockerfile 部分同 `124a96e`）
+
+1. **Dockerfile 的 `ENV JAVA_OPTS` 被声明两次**：Docker 对同名 `ENV` 是覆盖不是追加，第一行（不含 Trim）被第二行完全盖掉，功能无影响但极易误判。已删掉重复行并注明「唯一一处、必须包含全部参数」。
+2. **节点安装命令指向分支而非 tag**：`NodeServiceImpl.getInstallCommand()` 原拼 `refs/heads/feat/port-traffic-ranking/install.sh`，分支漂移会让用户在面板里拿到未发布脚本。改为 `refs/tags/2.0.7-beta-perf/install.sh`，与 `panel_install.sh` 拉 compose 的口径统一。
+
 ## 3. 待完成
 
 ### P0 — 需要决策/授权
@@ -294,10 +309,12 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 | 后端镜像 | `cp /root/docker-compose.yml.bak-20261109-233154 /root/docker-compose.yml` 后把 backend 镜像 tag 指回旧 digest，`docker compose up -d backend` |
 | journald | `rm /etc/systemd/journald.conf.d/99-flux.conf && systemctl restart systemd-journald` |
 | 前端镜像 | 同后端，`docker compose up -d frontend` 前把 tag 指回旧 digest |
-| 代码 | `git revert 851aedc abb5cec a2b97b5 97f17c6 74d1d33 fd911c7 5da3070 156bfc9 264a035 656c897 7d1e603 e4d6ecb be67a16 d2e38b9 b29282d d7e63e8 d843617 7473a73 cc61535 e34660d 556b96d`（各提交相互独立，可单独回滚） |
+| 代码 | `git revert 124a96e fc45e60 851aedc abb5cec a2b97b5 97f17c6 74d1d33 fd911c7 5da3070 156bfc9 264a035 656c897 7d1e603 e4d6ecb be67a16 d2e38b9 b29282d d7e63e8 d843617 7473a73 cc61535 e34660d 556b96d`（各提交相互独立，可单独回滚） |
 
-旧后端镜像 digest：`sha256:ff40dbd6…`（当前，含 arena 限制 + 原生内存归还）→ `sha256:b2224ff1…`（仅 arena 限制）→ `sha256:5e83ee24…`（Hikari + get_port 守卫）→ `sha256:836feb7c…` → `sha256:b0ee363d…`（脱敏版）→ `sha256:607a3beb…` → `sha256:580f0784…` → `sha256:c42978b6…`（第五轮，2026-11-01）→ `sha256:0a4d617a…`。
+旧后端镜像 digest：`sha256:12d65638…`（当前，含批量清理 + Trim + arena）→ `sha256:e301f7cc…`（批量清理，Dockerfile 仍重复 ENV）→ `sha256:ff40dbd6…`（含 arena 限制 + 原生内存归还）→ `sha256:b2224ff1…`（仅 arena 限制）→ `sha256:5e83ee24…`（Hikari + get_port 守卫）→ `sha256:836feb7c…` → `sha256:b0ee363d…`（脱敏版）→ `sha256:607a3beb…` → `sha256:580f0784…` → `sha256:c42978b6…`（第五轮，2026-11-01）→ `sha256:0a4d617a…`。
 
 > **回滚 arena 限制**：`git revert 264a035` 后重新 `docker build` + `push` + `compose up -d backend`。arena 限制只影响 glibc 分配策略，回滚不会改动任何业务数据。
 >
 > **回滚原生内存归还**：`git revert 851aedc abb5cec`，或只改生产 `/root/docker-compose.yml` 去掉 `-XX:TrimNativeHeapInterval=15000` 后 `docker compose up -d backend`（无需重新构建镜像）。回滚后 RSS 会回到约 300 MB。
+>
+> **回滚批量清理**：`git revert 124a96e` 后重建镜像。回滚后每轮配置上报会重新变成「每 service 一条 SELECT」——功能等价，只是查询数回升，**不会影响数据正确性**。

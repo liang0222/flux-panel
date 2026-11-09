@@ -664,3 +664,62 @@ docker exec springboot-backend sqlite3 /app/data/gost.db 'pragma integrity_check
 
 - RSS 会在 240–287 MB 之间波动，周期约 15 秒——这是 trim 的正常呼吸，不是抖动。
 - 回滚只需去掉 `-XX:TrimNativeHeapInterval=15000` 并 `docker compose up -d backend`，**无需重新构建镜像、无需动数据**。
+
+## 11. 第十四轮上线（批量清理 + 交付链路修正，2026-11-10 03:50 CST）
+
+### 11.1 变更
+
+| 提交 | 内容 | 是否需重建镜像 |
+|---|---|---|
+| `124a96e` | `CheckGostConfigAsync` 孤立项清理改批量查询；判定拆成 `findOrphanServices`/`findOrphanChains`；查询失败整轮跳过；Dockerfile 删掉重复的 `ENV JAVA_OPTS` | 是 |
+| `fc45e60` | `NodeServiceImpl.getInstallCommand()` 改指 `refs/tags/2.0.7-beta-perf/install.sh` | 是 |
+
+### 11.2 构建与推送
+
+```bash
+docker build -t ahmadplayz721/flux-panel-backend:2.0.7-beta \
+  -f springboot-backend/Dockerfile springboot-backend
+docker push ahmadplayz721/flux-panel-backend:2.0.7-beta
+```
+
+- manifest list digest：`sha256:12d65638a77e4cfebcb9a224881c0211a0d2053669b5e36c8d1fc9d0fc86a082`
+- `docker image inspect` 确认 `JAVA_OPTS` 仍含 `-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -XX:TrimNativeHeapInterval=15000`，`MALLOC_ARENA_MAX=2` 仍在。
+
+### 11.3 生产更新
+
+```bash
+cp /root/docker-compose.yml /root/docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)
+cd /root && docker compose pull backend && docker compose up -d backend
+```
+
+- 本次备份：`/root/docker-compose.yml.bak-20261110-035025`
+- 启动时间：`2026-11-09T19:50:34.605719934Z`（UTC）= 2026-11-10 03:50:34 CST
+
+### 11.4 上线后必查
+
+```bash
+docker inspect springboot-backend --format 'status={{.State.Status}} health={{.State.Health.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}'
+curl -s -o /dev/null -w 'v4=%{http_code}\n' http://127.0.0.1:6365/flow/test
+curl -s -o /dev/null -w 'v6=%{http_code}\n' 'http://[::1]:6365/flow/test'
+docker exec springboot-backend sqlite3 /app/data/gost.db "pragma integrity_check;"
+docker logs --since 5m springboot-backend 2>&1 | grep -c "删除孤立"      # 应为 0（当前无孤立项）
+docker logs --since 5m springboot-backend 2>&1 | grep -cE "ERROR|Exception"   # 应为 0
+```
+
+### 11.5 实测结果
+
+| 项 | 结果 |
+|---|---|
+| 容器状态 | `running` / `healthy` / `restarts=0` / `oom=false` |
+| HTTP | `v4=200`、`v6=200`、`front=200` |
+| 数据完整性 | `integrity_check=ok`；`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4 / user 1` |
+| 节点重连 | 节点 2/5/6（2.0.2）、节点 4（1.2.4）全部「连接建立成功」 |
+| 日志脱敏 | 明文 secret 计数 0 |
+| 错误 | `ERROR|Exception` 计数 0 |
+| 孤立清理 | 日志 0 条（当前确实无孤立项） |
+| 内存 | `VmRSS 246,572 kB`、`VmHWM 332,924 kB`、arena 21.0 MB、G1 堆 72.4 MB；`docker stats` **210.6 MiB** |
+
+### 11.6 注意
+
+- **Dockerfile 里同名 `ENV` 是覆盖不是追加**。本轮把重复的 `ENV JAVA_OPTS` 合并成一行，并在上方注明「唯一一处、必须包含全部参数」。以后往 `JAVA_OPTS` 加参数，必须改那一行，不能在别处再写一个 `ENV JAVA_OPTS=...`，否则前面的参数会被悄悄丢掉。
+- **安装命令的 tag 引用**：面板「节点监控 → 安装命令」现在指向 `refs/tags/2.0.7-beta-perf`。以后移动 tag 时，`install.sh`、`panel_install.sh` 的 compose 引用、以及这个安装命令会一起切到新内容——改 tag 等于给所有新装/升级换脚本，需谨慎。

@@ -25,7 +25,6 @@ WORKDIR /app
 #   加载器 551~560 个、类 13299 个（含 1401 个共享类），无 classloader 泄漏。
 #   192m 约为实测用量的 2.7 倍余量，既给出显式护栏，又不会误触发
 #   OutOfMemoryError: Metaspace。
-ENV JAVA_OPTS="-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
 # glibc malloc arena 上限。实测依据（生产 87.83.207.7，2026-11-10 01:30-01:45）：
 #   容器内 nproc=8，未设置本变量时 glibc 默认按 8 x (1+8) = 72 个 arena 上限，
 #   /proc/<pid>/smaps 按 64MB 对齐统计到 51-53 个 arena 段、实占 235-273MB，
@@ -49,6 +48,8 @@ ENV MALLOC_ARENA_MAX=2
 #     对照 mean 5.57ms、本设置 mean 5.65ms，差异 1.5%，小于轮间波动（4.92-6.52ms），
 #     未观察到可测量的劣化。
 #   该参数只影响空闲内存何时归还，不改变堆上限、并发能力、超时与任何业务行为。
+# 最终生效的 JAVA_OPTS（唯一一处）。上面第 1~4 条注释是对应参数取值的实测依据；
+# 注意本行必须包含全部参数，Dockerfile 里重复声明 ENV 会覆盖而不是追加。
 ENV JAVA_OPTS="-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -XX:TrimNativeHeapInterval=15000 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
 ENV LANG=en_US.UTF-8
 ENV LANGUAGE=en_US:en

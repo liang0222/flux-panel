@@ -837,3 +837,63 @@ done
 1. 看到 RSS 在动就以为有问题——trim 的存在就是为了让它动。只要 `VmHWM` 不涨，就是健康的。
 2. 用 `docker stats` 判断泄漏——它读的是 cgroup `memory.current`，含 page cache，波动比进程 RSS 更大。判泄漏看 `VmHWM` 与长期趋势。
 3. 把 `0xe0000000` 算进 arena——会凭空多出 73 MB，导致「限制 arena 没效果」的错误结论。
+
+## 15. 配置上报链路的观察方法（2026-11-10 新增）
+
+节点每 10 分钟通过 `POST /flow/config` 上报一次完整 gost 配置，面板据此清理「节点上还有、但数据库里已删」的孤立 service/chain/limiter。这条链路本身不涉及内存，但它是排查「删了转发端口还在」的第一现场。
+
+### 15.1 确认上报是否正常
+
+```bash
+docker logs --since 30m springboot-backend 2>&1 | grep "配置数据接收成功"
+# 期望：每个在线节点每 10 分钟一条，例如
+#   🔓 节点 5 配置数据接收成功（已解密）
+```
+
+节点不上报 = 面板永远看不到该节点上多出来的 service。此时先在节点上 `systemctl status flux_agent`，再看 `journalctl -u flux_agent -n 50` 有没有 `❌ WebSocket读取消息错误` 或 `配置上报失败`。
+
+### 15.2 确认有没有孤立项被清理
+
+```bash
+docker logs --since 24h springboot-backend 2>&1 | grep "删除孤立"
+```
+
+- **0 条**：说明节点上的 service/chain 与数据库完全一致，这是常态。
+- 出现 `删除孤立的服务: ["<forwardId>_<userId>_<userTunnelId>_tcp", ...]`：说明该转发在数据库里已删、但节点上还留着。这类日志是**修复生效的证据**，不是故障。
+- 如果**大量**出现（几十上百条集中在同一时刻）：先怀疑是不是刚做过批量删除；如果没做，要立刻查数据库是否可读（见 15.3）。
+
+### 15.3 批量清理的安全边界（排查时必看）
+
+2026-11-10 起，孤立项判定改为「先批量查 id 是否存在，再逐条判定」。**批量查询失败时整轮跳过清理**，不会误删。因此：
+
+- 若日志里出现 `批量查询 id 是否存在失败，本轮跳过清理以避免误删` → 数据库当时不可用，本轮什么都没删，等下一轮即可。
+- **不应该**看到「数据库报错的同时，日志里还有大量 `删除孤立`」——如果真出现这种组合，说明有人把失败路径改回了「返回空集合」，属于严重回归，因为那等于把一次抖动放大成大规模误删。
+
+### 15.4 判断「节点上到底多不多」
+
+面板只上报、不查询节点当前配置。要直接看节点上实际有什么：
+
+```bash
+# 节点上
+ls -l /etc/flux_agent/gost.json
+python3 - <<'PY'
+import json
+d = json.load(open('/etc/flux_agent/gost.json'))
+print('services', len(d.get('services') or []))
+print('chains  ', len(d.get('chains') or []))
+print('limiters', len(d.get('limiters') or []))
+PY
+```
+
+把 `services` 数量与面板数据库的 `select count(*) from forward;` 对比：正常情况下 service 数 ≈ 转发数 × 2（`_tcp` + `_udp`）+ 隧道数（`_tls`）。
+
+### 15.5 数据库侧的对应查询
+
+```bash
+docker exec springboot-backend sqlite3 /app/data/gost.db \
+  "select 'forward',count(*) from forward union all
+   select 'tunnel',count(*) from tunnel union all
+   select 'chain_tunnel',count(*) from chain_tunnel;"
+```
+
+数据量与孤立清理日志要能对上：如果 `forward` 从 193 掉到 190，随后出现 3 组 `删除孤立` 日志，那是正常的级联清理。

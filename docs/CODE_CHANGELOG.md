@@ -1113,3 +1113,75 @@ Docker 的 `environment:` **覆盖**镜像里的 `ENV`。只改 Dockerfile 的�
 改为循环外只查一次，并显式传 `false`（不抛异常，取第一条）。`chainTunnels` 为空时直接置 `forward.status=0` 并 `continue`，与原行为一致。
 
 验证：`mvn test` **Tests run: 106, Failures: 0, Errors: 0, BUILD SUCCESS**。
+
+---
+
+## 24. 第十四轮：节点配置上报的孤立项清理改用批量查询
+
+### 24.1 问题
+
+`springboot-backend/src/main/java/com/admin/common/task/CheckGostConfigAsync.java` 的 `cleanOrphanedServices` / `cleanOrphanedChains` 是「遍历节点上报的每一项 → 每项单独查一次库 → 判定 → 立即下发删除命令」的写法：
+
+```java
+for (ConfigItem service : configItems) {
+    ...
+    Tunnel tunnel = tunnelId == null ? null : tunnelService.getById(tunnelId);   // 每个 service 一条 SELECT
+    ...
+}
+```
+
+调用链是 `FlowController.config()`（`POST /flow/config`）→ `checkGostConfigAsync.cleanNodeConfigs(...)`。节点每 10 分钟上报一次完整配置，**当前生产每个节点约 166 个 service + 1 个 chain**：
+
+- 每次上报 = 166 次 `forwardService.getById` / `tunnelService.getById`；
+- 5 个节点 = 每 10 分钟约 800 条单行 SELECT。
+
+这些查询本身很快（SQLite 主键查找），不是响应瓶颈，但它们是**纯浪费**：判定需要的只是「这个 id 在不在表里」，用一个 `IN` 查询就能一次拿全。同时它把清理逻辑和 WebSocket 下发耦合在同一个循环里，无法单独测试。
+
+### 24.2 修改
+
+1. **判定与执行分离**。新增包级可见方法：
+   - `List<JSONArray> findOrphanServices(List<ConfigItem>)` —— 返回需要删除的 service 名分组（孤立转发的 `_tcp` 与 `_udp` 合成一组）；
+   - `List<String> findOrphanChains(List<ConfigItem>)` —— 返回孤立的 chain 名。
+   两者只做判定、不碰网络；`cleanOrphanedServices` / `cleanOrphanedChains` 退化为「遍历结果 → `GostUtil.DeleteService` / `DeleteChains`」。
+2. **两段式查询**。先扫一遍名字把可能涉及的 id 收集进 `Set<Long>`，再用 `listByIds` 一次性取回真实存在的 id 集合，最后逐条 `contains` 判定。查询次数从 O(n) 降到常数（forward 一条、tunnel 一条，id 集合为空时连这两条都不发）。
+3. **失败语义显式化**。新增 `loadExistingIds(Set<Long>, Function<List<Long>, Set<Long>>)`：
+   - 入参为空 → 返回 `Collections.emptySet()`，不发查询（`listByIds` 传空集合的行为在不同 MyBatis-Plus 版本间不一致，显式短路更稳）；
+   - **查询抛异常 → 返回 `null`**，调用方据此**整轮 `return`，一条都不删**。
+
+   第 3 点是这次改动的关键边界。如果失败时返回空集合，所有 service 都会被判成「转发不存在」，于是对节点下发上百条删除命令——把一次可恢复的数据库抖动放大成不可恢复的大规模误删。原实现在这一点上是安全的（查库异常被 `safeExecute` 吞掉、该条不删），改造必须保持同样的安全边界。
+
+判定规则本身**完全未变**，包括两处容易看错的既有语义：
+
+- `web_api` 是面板自身注册的服务，永远跳过；
+- `x_tls` 这种「id 段不是数字」的名字，`parseId` 返回 `null` 后会走进 `tunnelId == null` 分支被判为孤立并删除——这是改造前就有的行为，本次只是固定下来，没有收紧或放宽。
+
+### 24.3 验证
+
+新增 `springboot-backend/src/test/java/com/admin/common/task/CheckGostConfigAsyncOrphanTest.java`（6 例）：
+
+| 用例 | 断言 |
+|---|---|
+| `existingForwardKeptAndMissingForwardDeleted` | 存在的 100 不判孤立；不存在的 200 返回 `["200_1_2_tcp","200_1_2_udp"]` 一组 |
+| `queryFailureYieldsNoOrphans` | `listByIds` 抛异常 → 返回空列表，**一条都不删** |
+| `forwardLookupIsBatchedNotPerItem` | 50 个 service：`listByIds` 只调用 1 次，`getById` 0 次 |
+| `existingChainKeptAndMissingChainDeleted` | `chains_3`（tunnel 存在）保留，`chains_9` 判孤立 |
+| `chainQueryFailureYieldsNoOrphans` | chain 批量查询失败 → 空列表 |
+| `malformedNamesIssueNoQuery` | `web_api` / `weird` 跳过，`x_tls` 判孤立（沿用既有语义），且**不发任何查询** |
+
+全量 `mvn test`：**Tests run: 112, Failures: 0, Errors: 0, BUILD SUCCESS**（原 106，新增 6）。
+
+### 24.4 上线
+
+- 镜像 manifest list digest `sha256:12d65638a77e4cfebcb9a224881c0211a0d2053669b5e36c8d1fc9d0fc86a082`，已 push。
+- 解包 jar 核对：`CheckGostConfigAsync.class` 含 `findOrphanServices` / `findOrphanChains`。
+- **2026-11-10 03:50:34 生产上线**（备份 `/root/docker-compose.yml.bak-20261110-035025`）。
+- 上线后：`health=healthy`、`restarts=0`、`oom=false`、`v4=200`、`v6=200`、`front=200`、`integrity_check=ok`、数据量不变（`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4 / user 1`）、节点 2/4/5/6 全部重连、明文 secret 0、`ERROR|Exception` 0、`删除孤立` 日志 0 条（当前无孤立项，符合预期）。
+- 内存：`VmRSS 246,572 kB`、`VmHWM 332,924 kB`、arena 21.0 MB、G1 堆 72.4 MB；`docker stats` 210.6 MiB。
+
+### 24.5 顺带修掉的两个交付链路问题
+
+1. **Dockerfile 里 `ENV JAVA_OPTS` 被声明了两次**。Docker 对同名 `ENV` 是**覆盖**不是追加，第一行（不含 `-XX:TrimNativeHeapInterval`）被第二行完全盖掉，功能上无影响但极易误判。已删掉第一行，并在剩余那一行上方注明「唯一一处、必须包含全部参数」。
+2. **节点安装命令指向分支而非 tag**（提交 `fc45e60`）。`NodeServiceImpl.getInstallCommand()` 拼的是
+   `https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/install.sh`，
+   分支会漂移，用户在面板里点「安装命令」可能拿到未发布的脚本。改为 `refs/tags/2.0.7-beta-perf/install.sh`，与 `panel_install.sh` 拉 compose 的口径统一。
+   验证：`mvn test` 112 例全过；解包 jar 确认 `NodeServiceImpl.class` 含 `refs/tags/2.0.7-beta-perf`、不含 `refs/heads/feat/port-traffic-ranking`。
