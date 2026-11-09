@@ -913,6 +913,11 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
 
 
     public List<ChainTunnel> get_port(List<ChainTunnel> chainTunnelList, Integer in_port, Long forward_id) {
+        // 防御：隧道没有入口节点（chain_type=1）时，下面 list.getFirst() 会抛 NoSuchElementException，
+        // 报错信息无法定位原因。这里提前给出明确错误。
+        if (chainTunnelList == null || chainTunnelList.isEmpty()) {
+            throw new RuntimeException("该隧道没有入口节点，无法分配端口");
+        }
         List<List<Integer>> list = new ArrayList<>();
 
         // 获取每个节点的端口列表

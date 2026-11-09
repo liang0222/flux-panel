@@ -39,7 +39,11 @@ spring:
       # 这是既有设计，保持不变。
       max-lifetime: 500000
       connection-timeout: 30000
-      idle-timeout: 600000
+      # idle-timeout 必须小于 max-lifetime，否则 HikariCP 会打印
+      # "idleTimeout is close to or more than maxLifetime, disabling it"
+      # 并直接禁用空闲回收（等于该配置从未生效）。这里取 300000ms(5 分钟)，
+      # 既保留空闲连接回收，又不改变 max-lifetime 的既有语义。
+      idle-timeout: 300000
       maximum-pool-size: 10
       minimum-idle: 5
       pool-name: HikariCP
