@@ -236,13 +236,15 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
             } else {
                 this.removeById(forward.getId());
                 forwardPortService.remove(new QueryWrapper<ForwardPort>().eq("forward_id", forward.getId()));
+                // 修复：原实现把 return 写在了回滚循环体内，多入口节点时只回滚第一个已建 service，
+                // 其余节点上的 service 会残留。这里先回滚全部已成功的节点，再统一返回错误。
                 for (JSONObject jsonObject : success) {
                     JSONArray se = new JSONArray();
                     se.add(jsonObject.getString("name") + "_tcp");
                     se.add(jsonObject.getString("name") + "_udp");
                     GostUtil.DeleteService(jsonObject.getLong("node_id"), se);
-                    return R.err(gostDto.getMsg());
                 }
+                return R.err(gostDto.getMsg());
             }
 
         }
@@ -752,10 +754,6 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
 
         // 如果没有端口，返回-1表示无法解析
         return -1;
-    }
-
-    private DiagnosisResult performTcpPingDiagnosis(Node node, String targetIp, int port, String description) {
-        return TcpPingDiagnosisRunner.run(node, targetIp, port, description);
     }
 
     private DiagnosisResult performTcpPingDiagnosisWithConnectionCheck(Node node, String targetIp, int port, String description) {

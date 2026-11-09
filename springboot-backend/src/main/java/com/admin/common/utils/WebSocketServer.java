@@ -18,12 +18,15 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import javax.annotation.Resource;
 import java.net.InetSocketAddress;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
 
 
 @Slf4j
@@ -45,7 +48,15 @@ public class WebSocketServer extends TextWebSocketHandler {
     private static final ConcurrentHashMap<String, CompletableFuture<GostDto>> pendingRequests = new ConcurrentHashMap<>();
     
     // 缓存加密器实例，避免重复创建
-    private static final ConcurrentHashMap<String, AESCrypto> cryptoCache = new ConcurrentHashMap<>();
+    // 优化：与 FlowController 一致，改成有界 LRU，避免节点删除后 secret 对应的加密器永久驻留
+    private static final int CRYPTO_CACHE_SIZE = 64;
+    private static final Map<String, AESCrypto> cryptoCache = Collections.synchronizedMap(
+            new LinkedHashMap<String, AESCrypto>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, AESCrypto> eldest) {
+                    return size() > CRYPTO_CACHE_SIZE;
+                }
+            });
 
     /**
      * 加密消息包装器

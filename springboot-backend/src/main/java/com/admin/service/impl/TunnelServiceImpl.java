@@ -146,8 +146,23 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                 // 创建Chain， 指向chainNode的第一跳。如果chainNode为空就是指向出口
                 if (tunnelDto.getChainNodes().isEmpty()) { // 指向出口
                     GostDto gostDto = GostUtil.AddChains(in_node.getNodeId(), tunnelDto.getOutNodeId(), nodes);
-                    isError(gostDto);
-
+                    // 修复：原实现调用空方法 isError(gostDto)，直连出口这条路径在 AddChains 失败时完全静默，
+                    // 隧道已落库、chain 未建，却仍返回 R.ok()，用户看到成功但隧道实际不可用。
+                    // 这里与下方"指向第一跳"分支保持一致的失败处理与回滚。
+                    if (Objects.equals(gostDto.getMsg(), "OK")) {
+                        JSONObject data = new JSONObject();
+                        data.put("node_id", in_node.getNodeId());
+                        data.put("name", "chains_" + tunnel.getId());
+                        chain_success.add(data);
+                    } else {
+                        this.removeById(tunnel.getId());
+                        chainTunnelService.remove(new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnel.getId()));
+                        for (JSONObject chainSuccess : chain_success) {
+                            GostDto deleteChains = GostUtil.DeleteChains(chainSuccess.getLong("node_id"), chainSuccess.getString("name"));
+                            log.warn("回滚转发链失败: {}", deleteChains);
+                        }
+                        return R.err(gostDto.getMsg());
+                    }
                 } else {
                     GostDto gostDto = GostUtil.AddChains(in_node.getNodeId(), tunnelDto.getChainNodes().getFirst(), nodes);// 指向第一跳
                     if (Objects.equals(gostDto.getMsg(), "OK")){
@@ -610,17 +625,8 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
         return set.stream().sorted().collect(Collectors.toList());
     }
 
-    private void isError(GostDto gostDto){
-
-    }
-
-    private DiagnosisResult performTcpPingDiagnosis(Node node, String targetIp, int port, String description) {
-        return TcpPingDiagnosisRunner.run(node, targetIp, port, description);
-    }
-
     private DiagnosisResult performTcpPingDiagnosisWithConnectionCheck(Node node, String targetIp, int port, String description) {
         return TcpPingDiagnosisRunner.run(node, targetIp, port, description);
     }
-
 
 }

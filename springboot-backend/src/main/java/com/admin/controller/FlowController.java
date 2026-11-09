@@ -28,7 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Collections;
 
 /**
  * 流量上报控制器
@@ -77,8 +77,18 @@ public class FlowController extends BaseController {
         }
     }
 
-    // 缓存加密器实例，避免重复创建
-    private static final ConcurrentHashMap<String, AESCrypto> CRYPTO_CACHE = new ConcurrentHashMap<>();
+    // 缓存加密器实例，避免重复创建。
+    // 优化：原实现用 ConcurrentHashMap 且无任何淘汰逻辑，key 是节点 secret，
+    // 节点删除/重建后旧 entry 会永久驻留（虽然当前节点数很少、不构成内存风险，
+    // 但属于无界增长）。这里改成与 JwtUtil 一致的有界 LRU，上限 64 个节点。
+    private static final int CRYPTO_CACHE_SIZE = 64;
+    private static final Map<String, AESCrypto> CRYPTO_CACHE = Collections.synchronizedMap(
+            new LinkedHashMap<String, AESCrypto>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, AESCrypto> eldest) {
+                    return size() > CRYPTO_CACHE_SIZE;
+                }
+            });
 
     @Resource
     CheckGostConfigAsync checkGostConfigAsync;
