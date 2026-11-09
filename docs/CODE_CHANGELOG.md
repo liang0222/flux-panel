@@ -890,3 +890,47 @@ Hub 上仍是新版本。若要连 Hub 一起回退，需重新 push 旧镜像�
 | 2026-11-10 00:25:02 | 前端镜像 | `sha256:02d1ee31…` |
 
 全部 `Restarts=0`、`ExitCode=0`、`OOMKilled=false`；`v4=200`、`v6=200`、`frontend=200`；数据量不变（`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4 / user 1`），`pragma integrity_check = ok`。
+
+## 20. 第七轮：创建失败回滚补全（2026-11-10 00:45）
+
+### 20.1 问题
+
+隧道与转发的创建流程都是「先落库、再逐节点下发」，失败时靠手工回滚。两处回滚不完整，会在节点上留下孤儿配置：
+
+| 位置 | 缺陷 |
+|---|---|
+| `TunnelServiceImpl.createTunnel` 的 `AddChainService` 失败分支（两处） | 只回滚 `service_success`，**已建成功的 chain 不回滚**，节点上残留 `chains_<tunnelId>` |
+| `ForwardServiceImpl.createForward` 的 `if (node == null)` 分支 | 直接 `return R.err("部分节点不存在")`，此时 `forward` / `forward_port` 已落库、前面节点上的 service 也已建立，**全部残留** |
+
+孤儿配置的危害：agent 侧 `config.OnUpdate` 会把这些对象写进 `gost.json`，重启后自动恢复监听，但面板 DB 里没有对应记录 → 面板无法管理、删除时也删不到，形成「看不见的端口」。
+
+### 20.2 修改
+
+- `springboot-backend/src/main/java/com/admin/service/impl/TunnelServiceImpl.java`
+  - 新增 `private void rollbackChains(List<JSONObject> chainSuccess)`：逐个 `GostUtil.DeleteChains(node_id, name)`，失败只 `log.warn("回滚转发链失败: {}", ...)`。
+  - 新增 `private void rollbackServices(List<JSONObject> serviceSuccess)`：逐个 `GostUtil.DeleteService(node_id, [name])`，失败只 `log.warn("回滚服务失败: {}", ...)`。
+  - 两处 `AddChainService` 失败分支由「只回滚 service」改为「先 `rollbackChains` 再 `rollbackServices`」。
+- `springboot-backend/src/main/java/com/admin/service/impl/ForwardServiceImpl.java`
+  - 新增 `private void rollbackCreatedServices(List<JSONObject> success)`：每个节点删 `name_tcp` 与 `name_udp` 两条 service。
+  - `if (node == null)` 分支补 `this.removeById(forward.getId())` + `forwardPortService.remove(eq forward_id)` + `rollbackCreatedServices(success)`。
+  - 原下发失败分支的内联回滚循环改为调用同一方法，两处逻辑统一。
+
+**外部行为不变**：正常路径（全部下发成功）代码路径未动；只有失败路径多了回滚动作与 warn 日志。
+
+### 20.3 验证
+
+- `mvn test`：`Tests run: 101, Failures: 0, Errors: 0, Skipped: 0`，`BUILD SUCCESS`。
+- 镜像 `sha256:836feb7c…`，解包 `app.jar` 用 `javap -p` 确认三个方法已编入：
+  `TunnelServiceImpl.rollbackChains`、`TunnelServiceImpl.rollbackServices`、`ForwardServiceImpl.rollbackCreatedServices`。
+- 生产上线 2026-11-10 00:47:28：`health=healthy`、`restarts=0`、`exit=0`、`oom=false`；`v4=200`、`v6=200`、`front=200`；
+  `pragma integrity_check = ok`，`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4 / user 1` 不变；
+  节点 4（1.2.4）、5（2.0.2）、6（2.0.2）、2（2.0.2）全部重连成功。
+- 回滚路径本身**未做端到端触发测试**（需人为制造节点下发失败），仅由代码审读与编译产物确认。
+
+### 20.4 部署记录
+
+| 时间（CST） | 对象 | digest / 结果 |
+|---|---|---|
+| 2026-11-10 00:47:28 | 后端镜像 | `sha256:836feb7c…` |
+
+备份：`/root/docker-compose.yml.bak-20261110-004652`。
