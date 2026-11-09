@@ -133,11 +133,15 @@
 
 6. **`64.83.10.191:1000` 现在是「端口 OPEN 但 TLS 握手失败」**（`ssl3_read_n: unexpected eof`，读到 0 字节，无证书）。即 relay 服务半死。该 IP **不在 node 表**，面板管不到。
 
-7. **八份交付文档未同步本轮改动**：`docs/` 下 8 份文档（`MEMORY_AUDIT_REPORT.md` 等）里 `TransportContext` 出现 0 次，本轮改动未写入。`docs/HANDOFF.md` 与 `docs/CODE_CHANGELOG.md` 已同步。
+7. ~~八份交付文档未同步本轮改动~~ —— **已完成**（提交 `952fa02`）。七份文档已补入第六轮内容：`MEMORY_AUDIT_REPORT.md` §10、`MEMORY_ROOT_CAUSE_ANALYSIS.md` §16、`PERFORMANCE_OPTIMIZATION_REPORT.md` §18、`PERFORMANCE_COMPARISON.md` 第九轮、`DEPLOYMENT_GUIDE.md` §8、`SERVER_MONITORING_GUIDE.md` §12、`ROLLBACK_GUIDE.md` §11。九份文档合计 6,799 行。
 
 ### P2 — 观察中
 
-8. **内存侧「继续观察 先不动」**（用户 m03681 指示）仍有效，但 agent 升级后基线已变：RSS 从 110–123 MB 降到 56–59 MB，旧采样器 `/root/flux_watch.csv` 的对比基准需重新界定。
+8. **内存侧「继续观察 先不动」**（用户 m03681 指示）仍有效，但基线已变两次：
+   - agent 升级 + 未加壳：RSS 从 110–123 MB 降到 56–59 MB。
+   - **THP 已不再是全局 `always`**：2026-11-10 00:38 实测 `/sys/kernel/mm/transparent_hugepage/enabled` = `always [madvise] never`，`defrag` = `always defer defer+madvise [madvise] never`，且 `/etc/systemd/system/`、`/etc/rc.local`、`/etc/sysctl.d/` 下**没有任何持久化配置**——这是换内核（7.3.3-joeyblog-bbrv3-max）后的默认值。
+   - 直接后果：agent `AnonHugePages = 0`、Java `AnonHugePages = 0`。此前反复讨论的「THP 把 RSS 放大 2.3 倍」问题**已自然消失**，旧采样器 `/root/flux_watch.csv` 的历史基线（HWM 286,712 → 494,260 kB）与新基线不可直接比较。
+   - 当前实测（00:38）：agent `VmRSS 55,656 kB` / `VmHWM 65,548 kB` / `Threads 13` / `fds 196`；Java `Rss 363,700 kB`（堆 total 78,848K、used 72,467K；Metaspace used 61,323K）。
 
 ---
 
