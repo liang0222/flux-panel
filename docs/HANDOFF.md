@@ -1,15 +1,15 @@
 # 交接说明：Flux Panel 隧道断流 / 旧连接残留修复
 
 > 给下一个会话看的进度快照。读完这一页即可继续，不需要回看原对话。
-> 最后更新：2026-11-10 00:35（Asia/Shanghai）
+> 最后更新：2026-11-10 00:50（Asia/Shanghai）
 > 上一个交接（端口流量排行功能）：`docs/port-flow-ranking/handoff.md`
 
 ---
 
 ## 一句话现状
 
-**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端两批缺陷修复 + 日志脱敏 + 前端 24 个 lint error 全部修复并上线；journald 上限已安装。**
-剩余：`failTimeout` 新值尚未下发到节点（需先配多节点才有意义）、其他节点 agent 仍是旧二进制、node 5 假在线、八份交付文档未同步本轮改动。
+**「删了隧道旧隧道还在跑」的根因已修复并上线到本机 agent；后端三批缺陷修复 + 日志脱敏 + 前端 24 个 lint error 全部修复并上线；journald 上限已安装；八份交付文档已同步。**
+剩余：`failTimeout` 新值尚未下发到节点（需先配多节点才有意义）、其他节点 agent 仍是旧二进制、node 5 假在线、node 3 整机离线。
 
 ---
 
@@ -18,7 +18,7 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `/root/v2.0.7-beta` |
-| 当前分支 | `fix/transport-ctx-cancel`（HEAD `d7e63e8`，已 push） |
+| 当前分支 | `fix/transport-ctx-cancel`（HEAD `64e1bc9`，已 push） |
 | GitHub | `https://github.com/liang0222/flux-panel`，账号 `liang0222` |
 | GitHub token | 用户已在会话中提供（形如 `ghp_...`）；`gh` 需 `GH_TOKEN=` 前缀，或写进 push URL。**不要把 token 写进仓库文件——GitHub push protection 会拦截** |
 | Docker Hub | 账号 `ahmadplayz721`；token 形如 `dckr_pat_...`，由用户提供，**不入库** |
@@ -95,7 +95,19 @@
 
 **验证**：`eslint --quiet` → **0 problems**；`tsc --noEmit` EXIT=0；`vite build` `✓ built in 11.46s`。
 
-### 2.6 生产部署（全部已生效）
+### 2.6 创建失败回滚补全（提交 `d2e38b9`）
+
+两处「先落库、再逐节点下发」的失败路径回滚不完整，会在节点上留下孤儿配置（agent 重启后自动恢复监听，但面板 DB 无记录、删不掉）：
+
+- `TunnelServiceImpl.createTunnel` 的 `AddChainService` 失败分支：原只回滚 `service_success`，**已建成功的 chain 残留**。改为先 `rollbackChains(chain_success)` 再 `rollbackServices(service_success)`。
+- `ForwardServiceImpl.createForward` 的 `if (node == null)` 分支：原直接 `return R.err(...)`，此时 `forward`/`forward_port` 已落库、前面节点 service 已建，**全部残留**。改为补 `removeById` + `forwardPortService.remove` + `rollbackCreatedServices(success)`。
+- 抽出 `rollbackChains` / `rollbackServices` / `rollbackCreatedServices` 三个私有方法统一回滚与日志。
+
+**正常路径代码未动**，只有失败路径多了回滚动作与 `log.warn`。
+
+---
+
+### 2.7 生产部署（全部已生效）
 
 | 时间 | 变更 | 验证 |
 | --- | --- | --- |
@@ -106,8 +118,9 @@
 | 00:09:43 | 后端镜像 `sha256:607a3beb…`（隧道静默失败、回滚不全、无界缓存、死代码） | `Up (healthy)`、`Restarts=0`；`v4=200 v6=200 frontend=200`；节点 6/2/4 全部重连；采集任务 `转发 193 条，写入 10 条` |
 | 00:16 | 后端镜像 `sha256:b0ee363d…`（请求日志脱敏） | `docker logs \| grep -oE '"secret":"[^"]*"'` 全部为 `9e8b****cd88`，明文计数 **0** |
 | 00:25:02 | 前端镜像 `sha256:02d1ee31…`（Hook 顺序、a11y、JSX 转义） | `Up`、`Restarts=0`；`v4=200 v6=200`；线上 chunk `dashboard-D6OLUzFC.js` 含 `role:oe(S.inIp)`、`forward-CsoQnpxe.js` 含 3 处 `onKeyDown` |
+| 00:47:28 | 后端镜像 `sha256:836feb7c…`（创建失败回滚补全） | `Up (healthy)`、`Restarts=0`、`ExitCode=0`；`v4=200 v6=200 front=200`；`integrity_check=ok`、数据量不变；节点 4/5/6/2 全部重连 |
 
-**备份位置**：`/root/agent_backup_20261109-230427/`（`flux_agent.bak` / `gost.json.bak` / `config.json.bak`）、`/root/docker-compose.yml.bak-20261109-233154`、`/root/docker-compose.yml.bak-20261110-002444`。
+**备份位置**：`/root/agent_backup_20261109-230427/`（`flux_agent.bak` / `gost.json.bak` / `config.json.bak`）、`/root/docker-compose.yml.bak-20261109-233154`、`/root/docker-compose.yml.bak-20261110-002444`、`/root/docker-compose.yml.bak-20261110-004652`。
 
 ---
 
@@ -167,7 +180,7 @@
 ```bash
 # 本地
 cd /root/v2.0.7-beta
-git log --oneline -6            # f1bbf5b / cc61535 / e34660d / 556b96d / 939fc55
+git log --oneline -8            # 64e1bc9 / d2e38b9 / 059af4c / 952fa02 / 859225a / d7e63e8 / d843617 / 7473a73
 git status --short               # 应为空
 
 # 生产只读体检
