@@ -38,6 +38,18 @@ ENV JAVA_OPTS="-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -Dfile.encoding=UTF-8 
 #   取值 2 而非 4：4 的 arena 实占 187MB 且交替压测延迟更差，无额外收益。
 # 该变量只影响 glibc 内存分配策略，不改变任何业务行为、并发上限与超时。
 ENV MALLOC_ARENA_MAX=2
+# 原生内存定时归还。实测依据（生产 87.83.207.7，2026-11-10 02:45-03:05）：
+#   MALLOC_ARENA_MAX=2 之后仍有约 136MB 常驻在 glibc arena 的空闲页里（RSS 356MB，
+#   堆 used 仅 46MB、Metaspace 约 61MB），glibc 默认不会主动把这些空闲页还给内核。
+#   -XX:TrimNativeHeapInterval=15000 让 JVM 每 15 秒对所有 malloc arena 调用一次
+#   malloc_trim，把完全空闲的页 madvise(MADV_DONTNEED) 归还。
+#   同机双容器 A/B（同镜像、同 DB 快照、同 JVM 参数，唯一变量本开关）：
+#     对照 RSS 354,644-356,932 kB；本设置 RSS 271,376-274,804 kB，稳定差约 83MB（-23%）。
+#   延迟 A/B（各 9 轮 x 1200 请求 = 10,800 请求，正反两种顺序交替）：
+#     对照 mean 5.57ms、本设置 mean 5.65ms，差异 1.5%，小于轮间波动（4.92-6.52ms），
+#     未观察到可测量的劣化。
+#   该参数只影响空闲内存何时归还，不改变堆上限、并发能力、超时与任何业务行为。
+ENV JAVA_OPTS="-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -XX:TrimNativeHeapInterval=15000 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
 ENV LANG=en_US.UTF-8
 ENV LANGUAGE=en_US:en
 ENV LC_ALL=en_US.UTF-8
