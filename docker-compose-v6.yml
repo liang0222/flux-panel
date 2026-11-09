@@ -7,7 +7,7 @@ services:
       DB_PATH: /app/data/gost.db
       JWT_SECRET: ${JWT_SECRET}
       LOG_DIR: /app/logs
-      JAVA_OPTS: "-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
+      JAVA_OPTS: "-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -XX:TrimNativeHeapInterval=15000 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
     ports:
       # 双栈：显式绑定 IPv4 与 IPv6（只写 [::] 会变成纯 IPv6，只写端口默认只有 IPv4）
       - "0.0.0.0:${BACKEND_PORT}:6365"
