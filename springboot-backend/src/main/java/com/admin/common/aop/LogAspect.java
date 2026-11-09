@@ -18,6 +18,8 @@ import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Component
 @Aspect
@@ -34,6 +36,18 @@ public class LogAspect {
      * 同时保留原长度与开头片段，仍可判断「有没有收到请求、载荷有多大」。
      */
     private static final int MAX_PARAM_LOG_LEN = 1000;
+
+    /**
+     * 需要脱敏的字段名（大小写不敏感）。
+     *
+     * 背景：/flow/upload、/flow/config 由节点调用，参数里带 {@code secret}（节点密钥，
+     * 等同节点登录凭据）。改造前该字段被原样写进日志，生产 journal 与容器日志中可
+     * 直接读到明文 secret。这里在写日志前统一打码，只保留首尾各 4 位便于比对，
+     * 不影响任何业务逻辑与接口返回。
+     */
+    private static final Pattern SENSITIVE_JSON_FIELD = Pattern.compile(
+            "([\"'](?:secret|password|token|oldPassword|newPassword)[\"']\\s*:\\s*\")([^\"]*)(\")",
+            Pattern.CASE_INSENSITIVE);
 
     @Pointcut("@annotation(com.admin.common.aop.LogAnnotation)")
     public void pt() {
@@ -82,7 +96,7 @@ public class LogAspect {
         
 
         // 获取请求参数
-        String requestParams = truncateForLog(getRequestParams(joinPoint));
+        String requestParams = truncateForLog(maskSensitive(getRequestParams(joinPoint)));
         
         // 获取返回参数
         String responseParams = returnValue != null ? JSON.toJSONString(returnValue) : "无返回值";
@@ -137,7 +151,7 @@ public class LogAspect {
 
             
             // 获取请求参数
-            String requestParams = truncateForLog(getRequestParams(joinPoint));
+            String requestParams = truncateForLog(maskSensitive(getRequestParams(joinPoint)));
             
             // 获取异常信息
             String exceptionMsg = ex != null ? ex.getMessage() : "未知异常";
@@ -212,5 +226,33 @@ public class LogAspect {
         }
         return params.substring(0, MAX_PARAM_LOG_LEN)
                 + "...(已截断，原长度 " + params.length() + " 字符)";
+    }
+
+    /**
+     * 对请求参数中的敏感字段打码，再交给日志输出。
+     * 只处理形如 {@code "secret":"xxx"} 的 JSON 片段，未命中的内容原样返回。
+     */
+    private static String maskSensitive(String params) {
+        if (params == null || params.isEmpty()) {
+            return params;
+        }
+        try {
+            Matcher m = SENSITIVE_JSON_FIELD.matcher(params);
+            StringBuffer sb = new StringBuffer(params.length());
+            while (m.find()) {
+                String value = m.group(2);
+                String masked;
+                if (value.length() <= 8) {
+                    masked = "****";
+                } else {
+                    masked = value.substring(0, 4) + "****" + value.substring(value.length() - 4);
+                }
+                m.appendReplacement(sb, Matcher.quoteReplacement(m.group(1) + masked + m.group(3)));
+            }
+            m.appendTail(sb);
+            return sb.toString();
+        } catch (Exception e) {
+            return params;
+        }
     }
 }
