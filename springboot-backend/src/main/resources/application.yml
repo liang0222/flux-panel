@@ -1,4 +1,19 @@
 spring:
+  # @Async 线程池边界。
+  # 说明：本工程只有 CheckGostConfigAsync.cleanNodeConfigs 一处 @Async，由节点每 10 分钟
+  # 上报配置触发（当前 5 个节点）。不显式配置时用的是 Spring Boot 默认的
+  # applicationTaskExecutor：core=8、max=Integer.MAX_VALUE、queue=Integer.MAX_VALUE，
+  # 即「线程数够用但队列无界」——若某次清理卡在 WebSocket 等待上，任务会在队列里
+  # 无限堆积而不是被拒绝。这里给出显式上界，取值远高于实际并发（5 节点 / 10 分钟），
+  # 既不会拒绝正常任务，也不会在异常情况下无限占用内存。
+  task:
+    execution:
+      pool:
+        core-size: 2
+        max-size: 4
+        queue-capacity: 100
+        keep-alive: 60s
+      thread-name-prefix: flux-async-
   datasource:
     driver-class-name: org.sqlite.JDBC
     # 【连接级 PRAGMA 必须写在 URL 里】
