@@ -802,3 +802,41 @@ agent 二进制同时换成未加壳新构建（`sha256:91f3c258…`，32,092,31
 - 未加 `-XX:NativeMemoryTracking`（需重启且额外占内存，本轮 smaps 已足够定性）。
 - 未加 `mem_limit`（避免硬限制掩盖问题或触发 OOMKilled）。
 - `install.sh` 的 `MEM_LIMIT` 缺省 1200MiB 与生产 drop-in 的 512MiB 不一致，未改。
+
+## 十二、第十三轮：Java 进程 RSS 再降 83 MB
+
+### 12.1 动机
+
+第十轮把 `MALLOC_ARENA_MAX` 设为 2 后，arena 段从 51 降到 2–3、实占 235 MB → 140 MB，但 RSS 仍在 356 MB。堆 used 46 MB + Metaspace 61 MB = 107 MB，与 330 MB 的 `RssAnon` 相差 223 MB——说明还有一大块在别处。
+
+### 12.2 手段
+
+`/proc/<pid>/smaps` 逐段统计「起始地址 64 MB 对齐、大小 ≥ 32 MB、RSS > 0」的匿名 VMA。第十轮的结果是 3 段、140.2 MB。
+
+**⚠️ 口径更正（本轮发现）**：这个筛选条件会把 `0xe0000000` 一起算进去——那是 **G1 堆的保留区基址**（JDK 在 Linux x86-64 上把堆映射到固定地址），不是 glibc arena。实测该段 75,776 kB VMA / 73,024 kB RSS。所以「140.2 MB」里约 73 MB 是 Java 堆，真正的 arena 只有约 63 MB。第十轮报告里「arena 实占 235.4 → 140.2 MB」同样高估了约 73 MB，实际是约 162 MB → 约 63 MB。**结论方向不变（限制 arena 确实有效），但幅度要按扣除 G1 后的数字引用。**
+
+### 12.3 处理
+
+`-XX:TrimNativeHeapInterval=15000`（JDK 21+）：JVM 每 15 秒对所有 arena 调 `malloc_trim(0)`，把完全空闲的页 `madvise(MADV_DONTNEED)`。
+
+### 12.4 处理前后对比
+
+| 指标 | 处理前（仅 arena 限制） | 处理后（+ trim） | 变化 |
+|---|---:|---:|---|
+| 容器 RSS（`docker stats`） | 298.6 MiB | **228.4 MiB** | −70.2 MiB |
+| 进程 `VmRSS` | 356,956 kB | 240–287 MB（中位 244 MB） | **约 −83 MB（−23%）** |
+| `VmHWM` | 356,956 kB | 331,248 kB（恒定） | 峰值不再累积 |
+| 堆 used | 46.5 MB | 46.5 MB | 不变 |
+| Metaspace | 61 MB | 61 MB | 不变 |
+| 线程数 | 45–47 | 45–48 | 不变 |
+| 延迟（9 轮 × 1200 请求） | 5.57 ms | 5.65 ms | +1.5%（噪声内） |
+
+### 12.5 部署注意
+
+`environment:` 覆盖镜像 `ENV`，所以该参数必须同时写进 `springboot-backend/Dockerfile` 与四个 compose 文件（`docker-compose-v4.yml`、`docker-compose-v6.yml`、`deploy/docker-compose.yml`、`deploy/docker-compose.registry.yml`），否则走 compose 部署的实例拿不到。
+
+### 12.6 未处理
+
+- 未做 24 小时趋势观察（本轮只观察 6 分钟）。
+- 未测高并发（60 并发以上）下 trim 的 CPU 开销。
+- 未尝试 `-XX:+UseSerialGC` 等 GC 组合。

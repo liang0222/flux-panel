@@ -1231,3 +1231,91 @@ Welch t = −4.61。
 - **其他节点上的后端**：本优化只作用于运行后端的这一台机器，其他节点跑的是 agent 不是 Java。
 - **JVM 内部 DirectBuffer 明细**：未测（未加 NMT，需重启）。
 - **`MALLOC_ARENA_MAX` 与 SQLite native 库的交互**：仅观测到功能正常（`integrity_check=ok`、采集任务正常），未做专项压测。
+
+## 第十一轮：`-XX:TrimNativeHeapInterval` 的对照实验
+
+### 11.1 实验设置
+
+- 机器：生产 87.83.207.7（Debian 12，8 vCPU / 8 GB，内核 `7.3.3-joeyblog-bbrv3-max`）。
+- 两个容器 `abctl` / `abtrim`，同镜像 `ahmadplayz721/flux-panel-backend:2.0.7-beta`、同 DB 快照（`docker cp` 出 11,902,976 B 的 `gost.db` 各放一份）、同 `MALLOC_ARENA_MAX=2`、同 `-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m`，**唯一变量是 `-XX:TrimNativeHeapInterval=15000`**。
+- 端口 16381（ctl）/ 16382（trim），`--network gost-network`，`JWT_SECRET=abtest`。
+- 踩坑：首轮测试容器启动即退出，报 `Could not resolve placeholder 'LOG_DIR'`——镜像的 `logback-spring.xml` 依赖 `LOG_DIR` 环境变量，A/B 容器必须补 `-e LOG_DIR=/app/logs -e DB_PATH=/app/data/gost.db` 才能起来。
+
+### 11.2 内存对照
+
+| 阶段 | abctl（对照） | abtrim（开启） | 差值 |
+|---|---:|---:|---:|
+| 启动 90 秒，无压测 | 333,976 kB | 249,412 kB | −84.6 MB |
+| 800 次 `/flow/test` 后 | 344,868 kB | 260,972 kB | −83.9 MB |
+| 累计 2,400 次后 | 348,824 kB | 265,536 kB | −83.3 MB |
+| 再空闲 60 秒 | 349,280 kB | 287,260 kB | −62.0 MB |
+| 10 分钟低负载趋势（每分钟 1 次，02:56:22–03:05:23） | 354,644 → 356,932 kB | 271,376 → 274,804 kB | **−83 MB（−23%）** |
+
+对照组的 `VmHWM` 一路涨到 349,280 kB 且不再回落；开启组的 `VmHWM` 停在 353,920 kB（启动峰值）但 `VmRSS` 稳定在 271–275 MB，说明**峰值之后释放的内存被 trim 还给了内核**，这正是该参数的设计目标。
+
+### 11.3 延迟对照
+
+方法：单容器交替、每轮 20 × 60 = 1,200 请求、`/flow/test`，先预热 3 轮（每轮 200 请求）。为消除「先跑的占便宜/吃亏」的偏置，做了**正反两种顺序**各若干轮。
+
+| 轮次 | 顺序 | 对照 mean / p50 / p99 | 开启 mean / p50 / p99 |
+|---|---|---:|---:|
+| r1 | ctl→trim | 5.65 / 4.69 / 18.82 ms | 6.38 / 5.56 / 22.31 ms |
+| r2 | ctl→trim | 5.78 / 4.61 / 20.56 ms | 6.52 / 5.20 / 28.61 ms |
+| r3 | ctl→trim | 5.79 / 4.75 / 19.21 ms | 5.79 / 5.04 / 17.29 ms |
+| r4 | ctl→trim | 5.44 / 4.57 / 18.81 ms | 5.44 / 4.56 / 17.41 ms |
+| r5 | ctl→trim | 5.21 / 4.38 / 17.34 ms | 5.99 / 4.60 / 28.03 ms |
+| r6 | ctl→trim | 4.92 / 4.26 / 15.59 ms | 5.27 / 4.60 / 18.47 ms |
+| r7 | **trim→ctl** | 5.04 / 4.22 / 15.71 ms | 5.67 / 4.23 / 21.15 ms |
+| r8 | **trim→ctl** | 6.52 / 4.48 / 31.73 ms | 4.86 / 4.07 / 16.11 ms |
+| r9 | **trim→ctl** | 5.75 / 4.10 / 51.46 ms | 4.95 / 3.96 / 17.24 ms |
+
+9 轮合计均值：**对照 5.57 ms，开启 5.65 ms**，差 1.5%。轮间自然波动本身就有 4.92–6.52 ms（±15%），且反转顺序后开启组反而更快（r8/r9）——**结论只能是「未观察到可测量的劣化」，不能声称「更快」**。
+
+### 11.4 上线后实测
+
+2026-11-10 03:08:54 上线（镜像 `sha256:ff40dbd6…`）。12 次 × 30 秒采样（03:11:01–03:16:31）：
+
+```
+03:11:01 rss=244320kB hwm=331248kB threads=50
+03:11:31 rss=244444kB hwm=331248kB threads=48
+03:12:01 rss=251976kB hwm=331248kB threads=47
+03:12:31 rss=239900kB hwm=331248kB threads=47
+03:13:01 rss=244908kB hwm=331248kB threads=47
+03:13:31 rss=286636kB hwm=331248kB threads=47
+03:14:01 rss=241572kB hwm=331248kB threads=47
+03:14:31 rss=241540kB hwm=331248kB threads=47
+03:15:01 rss=272716kB hwm=331248kB threads=48
+03:15:31 rss=244016kB hwm=331248kB threads=48
+03:16:01 rss=245544kB hwm=331248kB threads=47
+03:16:31 rss=245868kB hwm=331248kB threads=47
+```
+
+中位约 244 MB，区间 240–287 MB，`VmHWM` 恒定 331,248 kB。`docker stats` 从 298.6 MiB 降到 **228.4 MiB**。RSS 的 ±45 MB 波动是 trim 周期内的正常呼吸（15 秒采一次 trim，30 秒采样会看到不同相位），不是抖动或泄漏。
+
+### 11.5 未测试项
+
+- **24 小时 / 7 天长期趋势**：未测试（本轮只观察到 6 分钟）。
+- **高并发下的表现**：未测试（延迟实验是 60 并发，生产实际并发远低于此）。
+- **与 `-XX:+UseSerialGC` 等其他 GC 的组合**：未测试。
+- **Windows / macOS 上该参数的行为**：未测试（生产是 Linux）。
+
+### 11.6 口径更正：64MB 对齐段里混了 G1 堆
+
+上表 11.2 用的是「进程 VmRSS」，不受影响。但第十轮报告里的「arena 实占」统计方法有偏差：筛选「64 MB 对齐 + ≥32 MB + RSS>0」会把 `0xe0000000` 命中，而那是 **G1 堆的保留区基址**，不是 glibc arena。
+
+上线后（trim 已开启）实测的两段：
+
+```
+0xe0000000       VMA 75,776 kB   RSS 73,024 kB   ← G1 堆
+0x7c1cd0000000   VMA 63,780 kB   RSS 25,600 kB   ← glibc arena
+```
+
+因此：
+
+| 统计对象 | 第十轮报告值 | 扣除 G1 后 |
+|---|---:|---:|
+| 未设 MAX 时的 arena | 235.4 MB | 约 162 MB |
+| 设 MAX=2 后的 arena | 140.2 MB | 约 63 MB |
+| MAX=2 + trim 后的 arena | — | **25.6 MB** |
+
+**结论方向不变**（限制 arena 与 trim 都确实有效，进程 RSS 的 −83 MB 是独立测量的），但引用 arena 绝对值时必须扣掉 G1 那 73 MB。

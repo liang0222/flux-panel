@@ -1065,3 +1065,51 @@ ENV MALLOC_ARENA_MAX=2
 - 未下调 `-Xmx512m`：堆 used 仅 46.5 MB，下调只会牺牲并发余量。
 - 未加 `-XX:NativeMemoryTracking`：需重启且会额外占用内存，本轮已用 smaps 定性，无需 NMT。
 - 未加 `mem_limit`：避免硬限制掩盖问题或触发 OOMKilled。
+
+## 23. 第十三轮：归还 glibc arena 空闲页 + 到期任务重复查询
+
+### 23.1 `-XX:TrimNativeHeapInterval=15000`（提交 `abb5cec`、`851aedc`）
+
+**问题**：第十轮把 `MALLOC_ARENA_MAX` 设为 2 之后，arena 段从 51 降到 2-3，但生产 RSS 仍在 356 MB 左右，而堆 used 只有 46 MB、Metaspace 约 61 MB。差额里约 136 MB 是 glibc arena 里的**空闲页**——glibc 默认不会把这些页归还内核（`M_TRIM_THRESHOLD` 只在 free 顶部块超过阈值时才 `brk`/`munmap`，arena 内部的空洞页永远不会还）。
+
+**修改**：`springboot-backend/Dockerfile` 的 `ENV JAVA_OPTS` 增加 `-XX:TrimNativeHeapInterval=15000`（JDK 21 起提供，实测该镜像 `java -XX:+PrintFlagsFinal` 可识别，默认值 0 = 关闭）。JVM 每 15 秒对所有 malloc arena 调一次 `malloc_trim(0)`，把完全空闲的页 `madvise(MADV_DONTNEED)`。
+
+**A/B 实测**（生产机 87.83.207.7，两个容器同镜像、同 DB 快照、同 JVM 参数、同 `MALLOC_ARENA_MAX=2`，唯一变量是该开关）：
+
+| 阶段 | 对照 abctl | 开启 abtrim | 差 |
+|---|---:|---:|---:|
+| 启动 90 秒（无压测） | 333,976 kB | 249,412 kB | −84.6 MB |
+| 800 请求后 | 344,868 kB | 260,972 kB | −83.9 MB |
+| 2,400 请求后 | 348,824 kB | 265,536 kB | −83.3 MB |
+| 空闲 60 秒后 | 349,280 kB | 287,260 kB | −62.0 MB |
+| 10 分钟每分钟采样（低负载） | 354,644–356,932 kB | 271,376–274,804 kB | **−83 MB（−23%）** |
+
+延迟 A/B（各 9 轮 × 1200 请求 = 10,800 请求，正反两种顺序交替，避免先后偏置）：
+
+| 轮次顺序 | 对照 mean | 开启 mean |
+|---|---:|---:|
+| ctl→trim（r1–r6） | 5.65 / 5.78 / 5.79 / 5.44 / 5.21 / 4.92 ms | 6.38 / 6.52 / 5.79 / 5.44 / 5.99 / 5.27 ms |
+| trim→ctl（r7–r9，反转） | 5.04 / 6.52 / 5.75 ms | 5.67 / 4.86 / 4.95 ms |
+| **9 轮合计均值** | **5.57 ms** | **5.65 ms** |
+
+差异 1.5%，小于轮间自然波动（4.92–6.52 ms），且反转顺序后 trim 组反而更快——**只能声称「未观察到可测量劣化」，不能声称「更快」**。
+
+**上线**（2026-11-10 03:08:54，镜像 `sha256:ff40dbd6f3cc1ca936cd543723a4fdcdabcaaf12f6e5e5c00af70ff5280bfcae`，备份 `/root/docker-compose.yml.bak-20261110-030844`、`/root/docker-compose.yml.bak-20261110-031006`）：`health=healthy`、`restarts=0`、`oom=false`、`v4=200`、`v6=200`、`front=200`、`integrity_check=ok`、`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4 / user 1`、节点 2/4/5/6 全部重连、明文 secret 0、`ERROR|Exception` 0。
+
+**上线后实测**（12 次 × 30 秒采样，03:11:01–03:16:31）：RSS 在 **239,900–286,636 kB** 之间波动，中位约 244 MB，`VmHWM` 恒定 331,248 kB（启动峰值不再增长）；`docker stats` 从 298.6 MiB 降到 **228.4 MiB**；`free -m` used 从 1502 降到 **834**（其中包含清理 A/B 容器的释放）。波动幅度约 45 MB，正是 trim 周期内的自然呼吸——这是该参数的预期行为，不是抖动。
+
+### 23.2 为什么四个 compose 也要改（提交 `851aedc`）
+
+Docker 的 `environment:` **覆盖**镜像里的 `ENV`。只改 Dockerfile 的话，用 `docker-compose-v4.yml` / `v6.yml` / `deploy/docker-compose.yml` / `deploy/docker-compose.registry.yml` 启动的实例都拿不到这个参数。四个文件同步补齐，生产 `/root/docker-compose.yml` 也同步改（两个备份各留一份改前状态）。
+
+### 23.3 `ResetFlowAsync.user()` 重复查询与异常中断（提交 `a2b97b5`）
+
+`springboot-backend/src/main/java/com/admin/common/task/ResetFlowAsync.java` 的 `user()` 原实现把 `userTunnelService.getOne(...)` 放在 `for (ChainTunnel chainTunnel : chainTunnels)` **内层**：
+
+- 同一条转发的每个入口节点都重复执行一次完全相同的查询（N 个入口 = N 次相同 SQL）；
+- 用的是 `getOne(wrapper)` 单参重载，结果多于一条时抛 `TooManyResultsException`；
+- 该异常被外层 `reset_flow()` 的 `catch (Exception e)` 吞掉，导致**后续所有过期用户与过期隧道整批漏处理**——不只是当前这一条。
+
+改为循环外只查一次，并显式传 `false`（不抛异常，取第一条）。`chainTunnels` 为空时直接置 `forward.status=0` 并 `continue`，与原行为一致。
+
+验证：`mvn test` **Tests run: 106, Failures: 0, Errors: 0, BUILD SUCCESS**。

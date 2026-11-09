@@ -1,7 +1,7 @@
 # 交接说明：Flux Panel 隧道断流 / 旧连接残留修复
 
 > 给下一个会话看的进度快照。读完这一页即可继续，不需要回看原对话。
-> 最后更新：2026-11-10 01:56（Asia/Shanghai）
+> 最后更新：2026-11-10 03:20（Asia/Shanghai）
 > 上一个交接（端口流量排行功能）：`docs/port-flow-ranking/handoff.md`
 
 ---
@@ -18,7 +18,7 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `/root/v2.0.7-beta` |
-| 当前分支 | `fix/transport-ctx-cancel`（HEAD `264a035`） |
+| 当前分支 | `fix/transport-ctx-cancel`（HEAD `851aedc`） |
 | GitHub | `https://github.com/liang0222/flux-panel`，账号 `liang0222` |
 | GitHub token | 用户已在会话中提供（形如 `ghp_...`）；`gh` 需 `GH_TOKEN=` 前缀，或写进 push URL。**不要把 token 写进仓库文件——GitHub push protection 会拦截** |
 | Docker Hub | 账号 `ahmadplayz721`；token 形如 `dckr_pat_...`，由用户提供，**不入库** |
@@ -175,6 +175,20 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 
 ---
 
+### 2.10 归还 glibc arena 空闲页（提交 `abb5cec`、`851aedc`）
+
+`MALLOC_ARENA_MAX=2` 之后仍有约 136 MB 常驻在 arena 的空闲页里。加 `-XX:TrimNativeHeapInterval=15000` 让 JVM 每 15 秒 `malloc_trim` 一次。
+
+同机双容器 A/B：对照 354–357 MB，开启 271–275 MB，**稳定差约 83 MB（−23%）**；10,800 请求延迟 A/B 差异 1.5%（小于轮间波动 4.92–6.52 ms），未观察到可测量劣化。
+
+上线后 `docker stats` 298.6 → **228.4 MiB**，RSS 在 240–287 MB 之间随 trim 周期呼吸，`VmHWM` 恒定 331 MB。
+
+**注意**：`environment:` 会覆盖镜像 `ENV`，所以 `docker-compose-v4.yml`、`docker-compose-v6.yml`、`deploy/docker-compose.yml`、`deploy/docker-compose.registry.yml` 四份都必须带上该参数，否则走 compose 的部署拿不到。
+
+### 2.11 到期任务重复查询与异常中断（提交 `a2b97b5`）
+
+`ResetFlowAsync.user()` 把 `userTunnel` 查询放在 `chainTunnel` 内层循环里（N 个入口 = N 次相同 SQL），且用会抛异常的 `getOne`。异常被外层 catch 吞掉后，**后续所有过期用户与隧道整批漏处理**。改为循环外查一次 + `getOne(wrapper, false)`。
+
 ## 3. 待完成
 
 ### P0 — 需要决策/授权
@@ -241,7 +255,7 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 ```bash
 # 本地
 cd /root/v2.0.7-beta
-git log --oneline -12           # 264a035 / 656c897 / 7d1e603 / e4d6ecb / be67a16 / b29282d / d2e38b9 / 64e1bc9 / b05293e / 059af4c / 952fa02 / 859225a
+git log --oneline -14           # 851aedc / abb5cec / a2b97b5 / 97f17c6 / 74d1d33 / fd911c7 / 5da3070 / 156bfc9 / 264a035 / 656c897 / 7d1e603 / e4d6ecb / be67a16 / b29282d
 git status --short               # 应为空
 
 # 生产只读体检
@@ -280,8 +294,10 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 | 后端镜像 | `cp /root/docker-compose.yml.bak-20261109-233154 /root/docker-compose.yml` 后把 backend 镜像 tag 指回旧 digest，`docker compose up -d backend` |
 | journald | `rm /etc/systemd/journald.conf.d/99-flux.conf && systemctl restart systemd-journald` |
 | 前端镜像 | 同后端，`docker compose up -d frontend` 前把 tag 指回旧 digest |
-| 代码 | `git revert 264a035 656c897 7d1e603 e4d6ecb be67a16 d2e38b9 b29282d d7e63e8 d843617 7473a73 cc61535 e34660d 556b96d`（各提交相互独立，可单独回滚） |
+| 代码 | `git revert 851aedc abb5cec a2b97b5 97f17c6 74d1d33 fd911c7 5da3070 156bfc9 264a035 656c897 7d1e603 e4d6ecb be67a16 d2e38b9 b29282d d7e63e8 d843617 7473a73 cc61535 e34660d 556b96d`（各提交相互独立，可单独回滚） |
 
-旧后端镜像 digest：`sha256:b2224ff1…`（当前，含 arena 限制）→ `sha256:5e83ee24…`（Hikari + get_port 守卫）→ `sha256:836feb7c…` → `sha256:b0ee363d…`（脱敏版）→ `sha256:607a3beb…` → `sha256:580f0784…` → `sha256:c42978b6…`（第五轮，2026-11-01）→ `sha256:0a4d617a…`。
+旧后端镜像 digest：`sha256:ff40dbd6…`（当前，含 arena 限制 + 原生内存归还）→ `sha256:b2224ff1…`（仅 arena 限制）→ `sha256:5e83ee24…`（Hikari + get_port 守卫）→ `sha256:836feb7c…` → `sha256:b0ee363d…`（脱敏版）→ `sha256:607a3beb…` → `sha256:580f0784…` → `sha256:c42978b6…`（第五轮，2026-11-01）→ `sha256:0a4d617a…`。
 
 > **回滚 arena 限制**：`git revert 264a035` 后重新 `docker build` + `push` + `compose up -d backend`。arena 限制只影响 glibc 分配策略，回滚不会改动任何业务数据。
+>
+> **回滚原生内存归还**：`git revert 851aedc abb5cec`，或只改生产 `/root/docker-compose.yml` 去掉 `-XX:TrimNativeHeapInterval=15000` 后 `docker compose up -d backend`（无需重新构建镜像）。回滚后 RSS 会回到约 300 MB。
