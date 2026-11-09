@@ -934,3 +934,65 @@ Hub 上仍是新版本。若要连 Hub 一起回退，需重新 push 旧镜像�
 | 2026-11-10 00:47:28 | 后端镜像 | `sha256:836feb7c…` |
 
 备份：`/root/docker-compose.yml.bak-20261110-004652`。
+
+---
+
+## 21. 第九轮：agent 日志中的节点 secret 脱敏（提交 `be67a16`、`e4d6ecb`）
+
+### 21.1 问题
+
+节点 secret 是 agent 与面板之间的身份凭据，等价于登录口令（`/flow/upload?secret=<32 位十六进制>`
+直接可用）。生产排查发现它被两处以明文写进 systemd journal，而 journald 默认保留一个月：
+
+```text
+# 1) WebSocket 连接 URL
+journalctl -u flux_agent | grep -c "secret="     # 17 次
+🔗 WebSocket连接URL: ws://87.83.207.7:6365/system-info?type=1&secret=9e8b…（明文 32 位）&version=2.0.2
+
+# 2) 上报失败时的错误文本（net/http 的 *url.Error 会把整个 URL 拼进 err）
+❌ 全局流量上报失败: 发送HTTP请求失败: Post "http://87.83.207.7:6365/flow/upload?secret=9e8b…（明文）": connect: connection refused
+```
+
+第 2 类更隐蔽：面板重启期间（本轮多次滚动更新）每次上报失败都会打一条，属于常态化泄漏。
+
+### 21.2 修改
+
+| 文件 | 位置 | 修改 |
+|---|---|---|
+| `go-gost/x/socket/websocket_reporter.go` | `StartWebSocketReporterWithConfig` | `fmt.Printf("🔗 WebSocket连接URL: %s\n", fullURL)` → `maskSecretInURL(fullURL)`；新增 `maskSecretInURL` |
+| `go-gost/x/service/traffic_reporter.go` | 两处 `client.Do(req)` 的 err 包装 | `fmt.Errorf("发送HTTP请求失败: %v", err)` → 把 err 文本里的完整 URL 替换为 `maskSecretInURL(...)` 版本；新增同名 `maskSecretInURL` |
+
+`maskSecretInURL` 语义（两个包各一份，互不依赖）：
+
+- 解析 URL → 取 `secret` 查询参数 → 长度 > 8 时替换为「前 4 + `****` + 后 4」（如 `9e8b****cd88`），
+  长度 ≤ 8 直接全掩码 `****`。
+- 解析失败返回 `(URL 解析失败)`，**不抛错、不中断连接流程**。
+- 用 `url.Values.Encode()` 回写，因此掩码里的 `*` 会被编码成 `%2A`，这是 `Query().Encode()` 的正常行为，
+  不影响可读性（`secret=9e8b%2A%2A%2A%2Acd88`）。
+
+**外部行为不变**：URL 本身、建连参数、重试间隔、超时、加密逻辑全部未动，只改日志字符串。
+
+### 21.3 验证
+
+- `go build ./...` + `go vet ./service/ ./socket/`：EXIT=0。
+- 临时单测（跑完即删，未入库）：
+  - `TestMaskSecretInURL`（socket 包）：32 位 secret → `9e8b%2A%2A%2A%2Acd88`；`short` → `%2A%2A%2A%2A`；无 secret 的 URL 原样返回。PASS。
+  - `TestMaskSecretInURLForError`（service 包）：模拟 `Post "<url>": dial tcp ...` 文本替换后不含明文。PASS。
+- 二进制：`gost-amd64` 32,092,312 B，`sha256:e7fa5ef2e8ce17dac333d16895e5463d3be784fd9411d1649097040a7a918da7`；
+  `strings | grep -c maskSecretInURL` = 2（两个包各一处符号）。
+- GitHub Release `2.0.7-beta-perf`：`gost-amd64` 32,092,312 B、`gost-arm64` 30,146,712 B（`sha256:1c364276…`）已替换。
+
+### 21.4 部署记录
+
+| 时间（CST） | 对象 | 结果 |
+|---|---|---|
+| 2026-11-10 01:06:30 | 本机 agent（仅 socket 脱敏） | `MainPID=207748`、`NRestarts=0`、`VmRSS 51,068 kB`、`Threads 13`；明文 secret 计数 **0**，掩码日志 1 条 |
+| 2026-11-10 01:09:52 | 本机 agent（socket + 上报错误双重脱敏） | `MainPID=208156`、`NRestarts=0`、`VmRSS 50,736 kB`、`Threads 12`；明文 secret 计数 **0**；`v4=200 v6=200`；节点 2 重连成功；`services 166 / chains 1`；`estab 13`、`fds 183`、近 10 分钟 `✅` 7 条、错误 0 |
+
+备份：`/root/agent_backup_20261110-010630/`、`/root/agent_backup_20261110-010952/`（各含 `flux_agent.bak`）。
+
+### 21.5 未做
+
+- 历史 journal 里的旧明文 secret（约 17 条）**未清理**。清理需 `journalctl --vacuum-time`，会连带删除同期全部日志，
+  属破坏性操作，留给运维决策。缓解措施：面板侧可对该节点执行「重置密钥」，使旧值失效。
+- 其他节点（node 4/5/6）上的 agent 仍是旧二进制，同样会打印明文 secret，需按 `DEPLOYMENT_GUIDE.md` §8.4 逐节点升级。
