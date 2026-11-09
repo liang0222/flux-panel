@@ -18,7 +18,7 @@ get_architecture() {
 
 # ---- 下载源配置 ----
 # 主下载源：本仓库发布的自建二进制。
-# 相对上游的差异：内置 GOMEMLIMIT 堆软上限（缺省 1200MiB，可用 GOMEMLIMIT 或
+# 相对上游的差异：内置 GOMEMLIMIT 堆软上限（缺省 512MiB，可用 GOMEMLIMIT 或
 # FLUX_AGENT_MEMLIMIT 覆盖，off/0 关闭）、service 包不再 log.Fatal（可单元测试）、
 # -V 版本输出可用、修正两处 fmt.Println 格式化动词误用。业务逻辑与上游一致。
 AGENT_REPO="liang0222/flux-panel"
@@ -47,10 +47,15 @@ FALLBACK_URL=$(build_fallback_url)
 INSTALL_DIR="/etc/flux_agent"
 # Go 运行时堆软上限，写入 systemd 单元的 Environment=GOMEMLIMIT。
 # 作用：超过该值后 GC 会更积极回收，避免长时间运行后 RSS 无界增长。
-# 注意：主源二进制已内置同样的缺省值（1200MiB），此处显式设置是为
+# 注意：主源二进制已内置同样的缺省值（512MiB），此处显式设置是为
 #       (1) 回退到上游二进制时仍然生效；(2) 让 systemctl show 能直接看到当前值。
+# 缺省值依据（2026-10-31 生产 A/B 实测）：agent 实际 HeapAlloc 约 59MB，
+# 512MiB 有 8 倍余量不会引发频繁 GC；而上限高于历史峰值时 Go scavenger
+# 永不触发，峰值内存长期驻留（实测 300MB 场景：上限高于峰值 → RSS 300MB，
+# 低于峰值 → RSS 123MB）。此前缺省 1200MiB 与生产 drop-in 的 512MiB 不一致，
+# 会导致重跑安装时单元本体被写成 1200MiB，与 drop-in 冲突，故统一为 512MiB。
 # 可用环境变量覆盖：FLUX_AGENT_MEMLIMIT=900MiB ./install.sh
-MEM_LIMIT="${FLUX_AGENT_MEMLIMIT:-1200MiB}"
+MEM_LIMIT="${FLUX_AGENT_MEMLIMIT:-512MiB}"
 COUNTRY=$(curl -s --max-time 10 https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
     # 国内网络直连 GitHub Releases 常失败，统一走加速前缀（主/备地址都加）
@@ -332,6 +337,21 @@ EOF
 ensure_service_memory_limit() {
   local svc="/etc/systemd/system/flux_agent.service"
   [[ -f "$svc" ]] || return 0
+  # drop-in 优先级高于单元本体。若节点上已有 drop-in 设置了 GOMEMLIMIT
+  # （历史上手工加过内存上限的机器），只更新 drop-in，不再往本体写一份，
+  # 避免两处数值不一致导致 systemctl show 与实际行为对不上。
+  local dropin_dir="/etc/systemd/system/flux_agent.service.d"
+  if [[ -d "$dropin_dir" ]] && grep -rqs 'GOMEMLIMIT=' "$dropin_dir"; then
+    local f
+    for f in "$dropin_dir"/*.conf; do
+      [[ -f "$f" ]] || continue
+      if grep -q 'GOMEMLIMIT=' "$f"; then
+        sed -i -E "s|^(Environment=\"?GOMEMLIMIT=)[^\"]*(\"?)$|\1${MEM_LIMIT}\2|" "$f"
+      fi
+    done
+    systemctl daemon-reload
+    return 0
+  fi
   if grep -q '^Environment="GOMEMLIMIT=' "$svc"; then
     # 已存在：按当前 MEM_LIMIT 刷新数值
     sed -i "s|^Environment=\"GOMEMLIMIT=.*\"$|Environment=\"GOMEMLIMIT=$MEM_LIMIT\"|" "$svc"

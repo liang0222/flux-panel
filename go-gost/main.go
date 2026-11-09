@@ -171,10 +171,12 @@ func main() {
 //     支持 "1200MiB" / "1GiB" / "536870912" 这类标准写法，由 runtime 自行解析，
 //     因此这里只在 GOMEMLIMIT 未设置时才介入。
 //  2. 环境变量 FLUX_AGENT_MEMLIMIT —— 本项目的显式开关。
-//  3. 缺省值 1200MiB —— 面向 2GiB 及以上内存节点的一个保守默认：
-//     本机实测 flux_agent 在 212 个转发服务下 RSS 约 2.5GiB，其中相当一部分是
-//     「历史峰值未归还」而非活跃对象；1200MiB 软上限能让 runtime 在明显超出
-//     活跃用量时主动收缩，同时给 212 个服务的真实工作集留足余量。
+//  3. 缺省值 512MiB —— 与 install.sh 的 MEM_LIMIT 缺省值保持一致。
+//     依据 2026-10-31 生产 A/B 实测：agent 实际 HeapAlloc 约 59MB，512MiB 有
+//     8 倍余量，不会引发频繁 GC；而软上限高于历史峰值时 Go scavenger 永不触发，
+//     峰值内存长期驻留（同一实验：上限高于峰值 → 静默后 RSS 300MB，上限低于
+//     峰值 → RSS 123MB）。此前缺省 1200MiB 与生产 drop-in 的 512MiB 不一致，
+//     会让「内置默认」「install.sh」「drop-in」三处数值互相矛盾。
 //
 // 设为 0 或 "off" 表示不设置任何上限，完全回到 Go 默认行为（可用于回滚验证）。
 func applyMemoryLimit() {
@@ -186,7 +188,7 @@ func applyMemoryLimit() {
 	raw := os.Getenv("FLUX_AGENT_MEMLIMIT")
 	source := "环境变量 FLUX_AGENT_MEMLIMIT"
 	if raw == "" {
-		raw = "1200MiB"
+		raw = "512MiB"
 		source = "内置默认值"
 	}
 	// 关闭开关：大小写不敏感地接受 off/disable/0，避免误配置落到解析失败分支。

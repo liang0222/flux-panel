@@ -8,8 +8,14 @@ export LC_ALL=C
 
 
 # 全局下载地址配置
-DOCKER_COMPOSEV4_URL="https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/docker-compose-v4.yml"
-DOCKER_COMPOSEV6_URL="https://raw.githubusercontent.com/liang0222/flux-panel/refs/heads/feat/port-traffic-ranking/docker-compose-v6.yml"
+# 固定到发布 tag，而不是 feat 分支：
+#   - 分支是开发中的活内容，随时可能推进到未发布状态，新装/升级会拉到未验证的 compose；
+#   - tag 与镜像 tag、agent Release tag 一致，三者对齐才是一个可复现的发布版本。
+# 如需临时用分支验证，可 FLUX_COMPOSE_REF=refs/heads/xxx ./panel_install.sh
+COMPOSE_REPO="liang0222/flux-panel"
+COMPOSE_REF="${FLUX_COMPOSE_REF:-refs/tags/2.0.7-beta-perf}"
+DOCKER_COMPOSEV4_URL="https://raw.githubusercontent.com/${COMPOSE_REPO}/${COMPOSE_REF}/docker-compose-v4.yml"
+DOCKER_COMPOSEV6_URL="https://raw.githubusercontent.com/${COMPOSE_REPO}/${COMPOSE_REF}/docker-compose-v6.yml"
 
 COUNTRY=$(curl -s https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
