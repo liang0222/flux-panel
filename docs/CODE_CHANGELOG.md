@@ -996,3 +996,72 @@ journalctl -u flux_agent | grep -c "secret="     # 17 次
 - 历史 journal 里的旧明文 secret（约 17 条）**未清理**。清理需 `journalctl --vacuum-time`，会连带删除同期全部日志，
   属破坏性操作，留给运维决策。缓解措施：面板侧可对该节点执行「重置密钥」，使旧值失效。
 - 其他节点（node 4/5/6）上的 agent 仍是旧二进制，同样会打印明文 secret，需按 `DEPLOYMENT_GUIDE.md` §8.4 逐节点升级。
+
+## 22. 第十轮：限制 glibc arena 数量（Java 堆外内存）
+
+### 22.1 问题定位
+
+生产 Java 进程 RSS 长期在 373 MB 左右，而堆内 used 只有 46.5 MB、Metaspace 61 MB，差额约 240 MB 落在堆外。容器内没有 jcmd/jmap，只能用 `kill -3` 取 SIGQUIT 快照，再用 `/proc/<pid>/smaps` 逐段解析：
+
+- 347 个 VMA，其中匿名可写 145 个，匿名 RSS 合计 328 MB。
+- 按地址 64 MB 对齐分组（glibc arena 的典型特征）：**51 个对齐 VMA，RSS 合计 235.4 MB**。
+- 容器 `nproc` = 8，`MALLOC_ARENA_MAX` 未设置 → glibc 默认上限 8 × (1+8) = 72 个 arena，实际开了 51 个。
+- G1 堆保留区 `0xe0000000` 只有 76.4 MB RSS；其后 433 MB VMA RSS 为 0（保留未用）。
+- file-backed RSS 合计约 33 MB（libjvm.so 16.2 MB、classes.jsa 12.6 MB 等）。
+
+结论：**不是堆泄漏，是 glibc 每线程 arena 碎片化**。
+
+### 22.2 修改
+
+`springboot-backend/Dockerfile` 新增一行（含实测依据注释）：
+
+```dockerfile
+ENV MALLOC_ARENA_MAX=2
+```
+
+只影响 glibc 内存分配策略，不改变业务行为、并发上限、超时、接口与数据结构。
+
+### 22.3 A/B 实测（生产机 87.83.207.7，同一镜像、同一数据库快照、同一 JVM 参数）
+
+用三个容器并行对照，唯一差异是 `MALLOC_ARENA_MAX`：
+
+| 变体 | 空闲 RSS | 压力后 RSS | arena 段数 | arena 实占 | 非 arena 匿名 |
+|---|---:|---:|---:|---:|---:|
+| 对照（未设置） | 373.8 MB | 510.1 MB | 52 | 269.8 MB | 87.1 MB |
+| `MALLOC_ARENA_MAX=2` | 345.7 MB | 393.6 MB | 5 | 164.8 MB | 84.2 MB |
+| `MALLOC_ARENA_MAX=4` | 334.6 MB | 397.2 MB | 5 | 187.0 MB | 92.8 MB |
+
+- **RSS 净减少 28～117 MB**，取决于当前线程数与历史峰值；持续压测下差距最大（对照涨 136 MB，`=2` 只涨 48 MB）。
+- **堆内 used、Metaspace 完全不变**，证明收益纯来自堆外。
+
+### 22.4 延迟 A/B
+
+混合负载（`/flow/test` 与 `/api/v1/config/get` 各半），单容器交替执行、双方各预热 3 轮、各测 3000 请求：
+
+| 变体 | n | mean | p50 | p90 | p99 | max | HTTP |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 对照 | 3000 | 7.03 ms | 5.67 ms | 12.81 ms | 27.96 ms | 45.0 ms | 200×3000 |
+| `MALLOC_ARENA_MAX=2` | 3000 | 6.43 ms | 5.18 ms | 11.87 ms | 25.95 ms | 79.5 ms | 200×3000 |
+
+多轮交替压测的差值在 +7% / −8.5% 之间摆动，方向不稳定 → 判定为噪声内，**未观察到性能劣化**。
+
+### 22.5 取值为什么是 2 不是 4
+
+`=4` 的 arena 实占 187 MB（比 `=2` 多 22 MB），而在轮转顺序压测中 `=4` 的 mean 反而比对照差 4.2%，`=2` 好 9.0%。取 2 更省且不劣化。
+
+### 22.6 部署
+
+- 镜像 manifest digest `sha256:b2224ff1fe6912c7e784117be44f236b69cc0a98bf50e92e56bd259d60a89349`，已 push。
+- 2026-11-10 01:51:57 上线（备份 `/root/docker-compose.yml.bak-20261110-015120`）。
+- 上线后：`health=healthy`、`restarts=0`、`oom=false`、`v4=200`、`v6=200`、`front=200`。
+- 数据：`integrity_check=ok`、`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4`。
+- 节点 2/4/5/6 全部重连成功（节点 3 本就整机离线）。
+- 生产 arena 段 3 个、实占 140.2 MB（上线前 51 个 / 235.4 MB）；`docker stats` 从 343.2 MiB 降到 300.3 MiB。
+- 定时任务正常：`端口流量采集完成：转发 193 条，写入 5 条，跳过 188 条`。
+- 日志脱敏仍生效：`"secret":"9e8b****cd88"`，明文计数 0。
+
+### 22.7 未做
+
+- 未下调 `-Xmx512m`：堆 used 仅 46.5 MB，下调只会牺牲并发余量。
+- 未加 `-XX:NativeMemoryTracking`：需重启且会额外占用内存，本轮已用 smaps 定性，无需 NMT。
+- 未加 `mem_limit`：避免硬限制掩盖问题或触发 OOMKilled。
