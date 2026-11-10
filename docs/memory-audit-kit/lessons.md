@@ -383,6 +383,21 @@ java.lang.IllegalArgumentException: Could not resolve placeholder 'LOG_DIR' in v
 
 ---
 
+### 🚧 34. public 仓库里写 SSH 密码，push protection 不会拦
+
+**现象**：`docs/HANDOFF.md` 的「环境与访问」表格写了 `root@<IP>:22`，密码明文。GitHub 的 push protection 拦住了 token（`ghp_...`、`dckr_pat_...`），**但 SSH 密码不在它的检测范围内**，顺利推上去了。
+
+**后果**：仓库是 public（`api.github.com/repos/...` 返回 `"private": false`），密码已进入提交历史。**从 HEAD 删掉不等于从历史删掉**——任何人 clone 后 `git log -S'<密码>'` 就能捞出来。
+
+**解法（按代价从低到高）**：
+1. **换密码**（最直接、最彻底）。这是唯一能真正止损的动作。
+2. 从 HEAD 移除，改成「由用户提供（不入库）」。
+3. 若要清历史：`git filter-repo --replace-text` 或 BFG，然后 `--force-with-lease` 强推**所有**分支与 tag，并通知所有协作者重新 clone。代价大，且 GitHub 的 fork / 缓存 / 第三方镜像仍可能留副本。
+
+**纪律**：凭据类内容一律只写在 `/tmp/` 的临时脚本里，用完删。文档里只写「由用户提供」和占位符。
+
+**这次的实际处置**：已从 HEAD 的 `docs/HANDOFF.md` 移除，并在 §1.1 写明「本仓库是 public，凭据一律不入库」。**历史中的密码未清理，需要用户自行更换 SSH 密码。**
+
 ## 五、一句话总结
 
 > 这次真正降下来的内存，**没有一个来自"调小某个参数"**：而是先证明它不是泄漏（pprof / goroutine 斜率 / SIGQUIT 堆摘要），再找到三个独立机制（arena 碎片、arena 空闲页不归还、连接不释放），每个机制单独做 A/B 拿到数字，才敢上线。

@@ -9,7 +9,7 @@
 
 ## 一句话现状
 
-后端十三批缺陷/性能修复 + Go agent 连接生命周期与日志脱敏 + 前端 24 个 lint error + Java 堆外内存两轮压缩（glibc arena 上限、TrimNativeHeapInterval）全部已上线生产，`restarts=0`、`oom=false`、`v4/v6/front` 全 200。当前 Java RSS 约 230–270 MB（原 373 MB），agent RSS 约 50 MB（原 110–123 MB）。**本轮共 40 个提交、91 个文件，全部已推送，`fix/transport-ctx-cancel` = `feat/port-traffic-ranking` = tag `2.0.7-beta-perf` 三处同指 `ddb501d`。**
+后端十三批缺陷/性能修复 + Go agent 连接生命周期与日志脱敏 + 前端 24 个 lint error + Java 堆外内存两轮压缩（glibc arena 上限、TrimNativeHeapInterval）全部已上线生产，`restarts=0`、`oom=false`、`v4/v6/front` 全 200。当前 Java RSS 约 230–270 MB（原 373 MB），agent RSS 约 50 MB（原 110–123 MB）。**本轮共 41 个提交、95 个文件（docs 13 + 其余 82），全部已推送，`fix/transport-ctx-cancel` = `feat/port-traffic-ranking` = tag `2.0.7-beta-perf` 三处同指 `2662bd2`（tag 对象 `b6b5fb9`）。**
 
 ---
 
@@ -18,15 +18,23 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `/root/v2.0.7-beta` |
-| 当前分支 | `fix/transport-ctx-cancel`（HEAD `2f91136`，已与 `feat/port-traffic-ranking` fast-forward 同步；发布 tag `2.0.7-beta-perf` 已重建到同一提交） |
+| 当前分支 | `fix/transport-ctx-cancel`（HEAD `2662bd2`，已与 `feat/port-traffic-ranking` fast-forward 同步；发布 tag `2.0.7-beta-perf` 已重建到同一提交） |
 | GitHub | `https://github.com/liang0222/flux-panel`，账号 `liang0222` |
 | GitHub token | 用户已在会话中提供（形如 `ghp_...`）；`gh` 需 `GH_TOKEN=` 前缀，或写进 push URL。**不要把 token 写进仓库文件——GitHub push protection 会拦截** |
 | Docker Hub | 账号 `ahmadplayz721`；token 形如 `dckr_pat_...`，由用户提供，**不入库** |
-| 生产机 | `root@87.83.207.7:22`，密码 `123@123!Q`，Debian 12，8 vCPU / 8 GB |
+| 生产机 | `root@87.83.207.7:22`，密码由用户提供（**不入库**，见本文件 §1.1），Debian 12，8 vCPU / 8 GB |
 | 生产通道 | 本地无 sshpass，用 paramiko：`cat /tmp/xx.sh \| python3 /tmp/rc.py` |
 | 本机工具链 | 无原生 Go/JDK/Maven，全部走 Docker（`golang:1.23-bookworm`、`maven:3.9-eclipse-temurin-21`） |
 
 生产内核已被用户换成 `7.3.3-joeyblog-bbrv3-max`（BBRv3），原 `tcpfit` 56 Mbit 整形与 `initcwnd` 已随重启消失，sysctl 换成 `99-joeyblog.conf` + `99-tcp-tune.conf`，`tcp_keepalive_time` 由 600 变 60。
+
+### 1.1 凭据不入库（重要）
+
+本仓库是 **public**。SSH 密码、GitHub token、Docker Hub token、`JWT_SECRET` **一律不写进仓库文件**——GitHub push protection 会拦 token，但**不会拦 SSH 密码**，只能靠人工纪律。
+
+- 需要时向用户索取，或从本机 `~/.ssh/` / 环境变量取。
+- 会话内临时脚本放在 `/tmp/`（不入库），用完删。
+- 历史上 `docs/HANDOFF.md` 曾明文写入 SSH 密码（提交 `f096a24` 引入，提交 `2662bd2` 之后的修订版移除）；该密码已出现在 public 仓库历史中，**用户需自行更换**，详见 `docs/memory-audit-kit/lessons.md` §34。
 
 ---
 
@@ -134,7 +142,7 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 
 **定位**（容器内无 jcmd/jmap，只能 `kill -3` 取 SIGQUIT + 逐段解析 `/proc/<pid>/smaps`）：
 - 347 个 VMA，匿名可写 145 个，匿名 RSS 合计 328 MB。
-- 按 64 MB 对齐分组（glibc arena 特征）：**51 个对齐 VMA，RSS 合计 235.4 MB**。
+- 按 64 MB 对齐分组（glibc arena 特征）：**51 个对齐 VMA，RSS 合计 235.4 MB**。（⚠️ 该统计含 G1 堆基址 `0xe0000000` 的约 73 MB，扣除后约 162 MB；更正见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §18.2）
 - 容器 `nproc` = 8、`MALLOC_ARENA_MAX` 未设置 → glibc 默认上限 8 × (1+8) = 72 个 arena。
 - G1 堆保留区 `0xe0000000` 仅 76.4 MB RSS；file-backed 合计约 33 MB。
 
@@ -169,7 +177,7 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 | 00:59 | 后端镜像 `sha256:5e83ee24…`（get_port 空入口节点守卫 + Hikari idle-timeout） | `Up (healthy)`、`Restarts=0`、`oom=false`；`v4=200 v6=200 front=200`；`integrity_check=ok`、数据量不变；节点 5/6/2/4 全部重连；Hikari `idleTimeout is close to or more` 告警计数 **0**；`"secret":"9e8b****cd88"` |
 | 01:06:30 | 本机 agent（socket 层 URL 脱敏） | `MainPID=207748`、`NRestarts=0`、`VmRSS 51,068 kB`、`Threads 13`；明文 secret **0** |
 | 01:09:52 | 本机 agent（+ 上报失败错误脱敏） | `MainPID=208156`、`NRestarts=0`、`VmRSS 50,736 kB`、`Threads 12`；明文 secret **0**；`services 166 / chains 1`、`estab 13`、`fds 183`；`v4=200 v6=200` |
-| 01:51:57 | 后端镜像 `sha256:b2224ff1…`（`MALLOC_ARENA_MAX=2`） | `health=healthy`、`Restarts=0`、`oom=false`；`v4=200 v6=200 front=200`；`integrity_check=ok`、`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4`；节点 2/4/5/6 全部重连；arena 段 **51 → 3**、实占 **235.4 → 140.2 MB**；`docker stats` **343.2 → 300.3 MiB** |
+| 01:51:57 | 后端镜像 `sha256:b2224ff1…`（`MALLOC_ARENA_MAX=2`） | `health=healthy`、`Restarts=0`、`oom=false`；`v4=200 v6=200 front=200`；`integrity_check=ok`、`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4`；节点 2/4/5/6 全部重连；arena 段 **51 → 3**、实占 **235.4 → 140.2 MB**（⚠️ 含 G1 约 73 MB，扣除后约 63 MB；更正见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §18.2）；`docker stats` **343.2 → 300.3 MiB** |
 
 **备份位置**：`/root/agent_backup_20261109-230427/`（`flux_agent.bak` / `gost.json.bak` / `config.json.bak`）、`/root/agent_backup_20261110-010630/`、`/root/agent_backup_20261110-010952/`、`/root/docker-compose.yml.bak-20261109-233154`、`/root/docker-compose.yml.bak-20261110-002444`、`/root/docker-compose.yml.bak-20261110-004652`、`/root/docker-compose.yml.bak-20261110-005912`、`/root/docker-compose.yml.bak-20261110-015120`。
 
@@ -275,7 +283,7 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
    - **THP 已不再是全局 `always`**：2026-11-10 00:38 实测 `/sys/kernel/mm/transparent_hugepage/enabled` = `always [madvise] never`，`defrag` = `always defer defer+madvise [madvise] never`，且 `/etc/systemd/system/`、`/etc/rc.local`、`/etc/sysctl.d/` 下**没有任何持久化配置**——这是换内核（7.3.3-joeyblog-bbrv3-max）后的默认值。
    - 直接后果：agent `AnonHugePages = 0`、Java `AnonHugePages = 0`。此前反复讨论的「THP 把 RSS 放大 2.3 倍」问题**已自然消失**，旧采样器 `/root/flux_watch.csv` 的历史基线（HWM 286,712 → 494,260 kB）与新基线不可直接比较。
    - 当前实测（00:38）：agent `VmRSS 55,656 kB` / `VmHWM 65,548 kB` / `Threads 13` / `fds 196`；Java `Rss 363,700 kB`（堆 total 78,848K、used 72,467K；Metaspace used 61,323K）。
-   - **第三次变化（01:51:57）**：`MALLOC_ARENA_MAX=2` 上线后 Java `VmRSS 329,136 kB`（arena 段 51 → 3、实占 235.4 → 140.2 MB），`docker stats` 343.2 → 300.3 MiB。此后 Java 基线为 **约 300–330 MB**，与之前所有记录不可直接比较。
+   - **第三次变化（01:51:57）**：`MALLOC_ARENA_MAX=2` 上线后 Java `VmRSS 329,136 kB`（arena 段 51 → 3、实占 235.4 → 140.2 MB（⚠️ 含 G1 约 73 MB，扣除后约 63 MB；更正见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §18.2）），`docker stats` 343.2 → 300.3 MiB。此后 Java 基线为 **约 300–330 MB**，与之前所有记录不可直接比较。
 
 ---
 
@@ -359,8 +367,8 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 | 文件 | 内容 |
 | --- | --- |
 | `docs/memory-audit-kit/README.md` | 索引 + 这次三个根因的一句话版 + 三条最容易犯的错 |
-| `docs/memory-audit-kit/prompt.md` | 完整任务书（20 节 + 占位符替换表），下次整段复制即可开工 |
-| `docs/memory-audit-kit/lessons.md` | 33 条踩坑与解法（测量口径 / 代码缺陷 / 配置环境 / 工具安全网） |
+| `docs/memory-audit-kit/prompt.md` | 完整任务书（20 节正文 + 附录占位符替换表），下次整段复制即可开工 |
+| `docs/memory-audit-kit/lessons.md` | 34 条踩坑与解法（测量口径 / 代码缺陷 / 配置环境 / 工具安全网 / 凭据） |
 | `docs/memory-audit-kit/reusability.md` | 通用步骤 vs 下次替换项 + 决策树 + 可复用脚本 |
 | Skill `production-memory-audit` | 已提交待确认；装进技能库后可被自动匹配 |
 
@@ -379,10 +387,10 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 
 | 项 | 数值 |
 | --- | --- |
-| 提交数 | 40（`556b96d^..ddb501d`） |
-| 改动文件 | 91 |
+| 提交数 | 41（`556b96d^..2662bd2`） |
+| 改动文件 | 95（docs 13 + 其余 82） |
 | 后端单测 | 114 例全过（原 95 例） |
-| 九份交付文档 | 8,723 行 |
+| 九份交付文档 | 8,771 行（`wc -l` 实测，含本文件 396 行） |
 | 复用包 | 4 份（README / prompt / lessons / reusability） |
 | 镜像 | backend `sha256:95c0624c…`（当前运行）、frontend `sha256:02d1ee31…` |
 | Docker 磁盘 | `image prune` 回收 2.473 GB（22 个 6.062 GB → 6 个 3.588 GB） |

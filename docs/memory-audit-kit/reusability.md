@@ -232,7 +232,7 @@ ss -tni state established | grep -oE 'lastsnd:[0-9]+' | sort -t: -k2 -rn | head 
 | --- | --- | --- |
 | 审计法 | Skill `production-memory-audit` | 换项目直接用 |
 | 任务书 | `docs/memory-audit-kit/prompt.md` | 改占位符即可 |
-| 踩坑表 | `docs/memory-audit-kit/lessons.md` | 33 条，多数跨项目成立 |
+| 踩坑表 | `docs/memory-audit-kit/lessons.md` | 34 条，多数跨项目成立 |
 | 进度交接 | `docs/HANDOFF.md` | 结构可复用，内容需重写 |
 | 八份交付文档 | `docs/*.md` | 结构可复用 |
 | 监控脚本 | 生产 `/root/arena_stat.py` | 改 `G1_BASE` 即可 |

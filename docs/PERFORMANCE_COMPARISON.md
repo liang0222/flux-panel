@@ -1218,7 +1218,7 @@ Welch t = −4.61。
 | `VmRSS` | 378,608 kB | 329,136 kB |
 | `VmHWM` | 389,144 kB | 330,924 kB |
 | arena 段数 | 51 | 3 |
-| arena 实占 | 235.4 MB | 140.2 MB |
+| arena 实占 | 235.4 MB（⚠️ 该统计含 G1 堆基址 `0xe0000000` 的约 73 MB，扣除后约 162 MB；更正见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §18.2） | 140.2 MB（⚠️ 含 G1 约 73 MB，扣除后约 63 MB；更正见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §18.2） |
 | `docker stats` | 343.2 MiB | 300.3 MiB |
 | 堆 used | 46.5 MB | 46.5 MB |
 | 线程数 | 46 | 46–47 |

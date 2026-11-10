@@ -1004,7 +1004,7 @@ journalctl -u flux_agent | grep -c "secret="     # 17 次
 生产 Java 进程 RSS 长期在 373 MB 左右，而堆内 used 只有 46.5 MB、Metaspace 61 MB，差额约 240 MB 落在堆外。容器内没有 jcmd/jmap，只能用 `kill -3` 取 SIGQUIT 快照，再用 `/proc/<pid>/smaps` 逐段解析：
 
 - 347 个 VMA，其中匿名可写 145 个，匿名 RSS 合计 328 MB。
-- 按地址 64 MB 对齐分组（glibc arena 的典型特征）：**51 个对齐 VMA，RSS 合计 235.4 MB**。
+- 按地址 64 MB 对齐分组（glibc arena 的典型特征）：**51 个对齐 VMA，RSS 合计 235.4 MB**。（⚠️ 该统计含 G1 堆基址 `0xe0000000` 的约 73 MB，扣除后约 162 MB；更正见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §18.2）
 - 容器 `nproc` = 8，`MALLOC_ARENA_MAX` 未设置 → glibc 默认上限 8 × (1+8) = 72 个 arena，实际开了 51 个。
 - G1 堆保留区 `0xe0000000` 只有 76.4 MB RSS；其后 433 MB VMA RSS 为 0（保留未用）。
 - file-backed RSS 合计约 33 MB（libjvm.so 16.2 MB、classes.jsa 12.6 MB 等）。
@@ -1056,7 +1056,7 @@ ENV MALLOC_ARENA_MAX=2
 - 上线后：`health=healthy`、`restarts=0`、`oom=false`、`v4=200`、`v6=200`、`front=200`。
 - 数据：`integrity_check=ok`、`forward 193 / forward_port 193 / node 5 / tunnel 2 / chain_tunnel 4`。
 - 节点 2/4/5/6 全部重连成功（节点 3 本就整机离线）。
-- 生产 arena 段 3 个、实占 140.2 MB（上线前 51 个 / 235.4 MB）；`docker stats` 从 343.2 MiB 降到 300.3 MiB。
+- 生产 arena 段 3 个、实占 140.2 MB（上线前 51 个 / 235.4 MB）（⚠️ 含 G1 约 73 MB，扣除后约 63 MB；更正见 `MEMORY_ROOT_CAUSE_ANALYSIS.md` §18.2）；`docker stats` 从 343.2 MiB 降到 300.3 MiB。
 - 定时任务正常：`端口流量采集完成：转发 193 条，写入 5 条，跳过 188 条`。
 - 日志脱敏仍生效：`"secret":"9e8b****cd88"`，明文计数 0。
 
