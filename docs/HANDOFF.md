@@ -9,7 +9,7 @@
 
 ## 一句话现状
 
-后端十四批缺陷/性能修复 + Go agent 连接生命周期与日志脱敏 + 前端 24 个 lint error + Java 堆外内存两轮压缩（glibc arena 上限、TrimNativeHeapInterval）全部已上线生产，`restarts=0`、`oom=false`、`v4/v6/front` 全 200。当前 Java RSS 约 230–270 MB（原 373 MB），agent RSS 约 50 MB（原 110–123 MB）。**本轮共 43 个提交、95 个文件（docs 13 + 其余 82），全部已推送，`fix/transport-ctx-cancel` = `feat/port-traffic-ranking` = tag `2.0.7-beta-perf` 三处同指 `cae0c34`（tag 对象 `ba14545`）。**
+后端十四批缺陷/性能修复 + Go agent 连接生命周期与日志脱敏 + 前端 24 个 lint error + Java 堆外内存两轮压缩（glibc arena 上限、TrimNativeHeapInterval）全部已上线生产，`restarts=0`、`oom=false`、`v4/v6/front` 全 200。当前 Java RSS 约 230–270 MB（原 373 MB），agent RSS 约 50 MB（原 110–123 MB）。**本轮共 44 个提交（`git rev-list --count 556b96d^..HEAD` 复核）、95 个文件（docs 13 + 其余 82），全部已推送；`fix/transport-ctx-cancel`、`feat/port-traffic-ranking`、tag `2.0.7-beta-perf` 三处同指同一提交（提交号用 `git rev-parse --short HEAD` 查）。**
 
 ---
 
@@ -18,7 +18,7 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `/root/v2.0.7-beta` |
-| 当前分支 | `fix/transport-ctx-cancel`（HEAD `cae0c34`，已与 `feat/port-traffic-ranking` fast-forward 同步；发布 tag `2.0.7-beta-perf` 已重建到同一提交，tag 对象 `ba14545`） |
+| 当前分支 | `fix/transport-ctx-cancel`（HEAD 见 `git log --oneline -1`；已与 `feat/port-traffic-ranking` fast-forward 同步；发布 tag `2.0.7-beta-perf` 已重建到同一提交） |
 | GitHub | `https://github.com/liang0222/flux-panel`，账号 `liang0222` |
 | GitHub token | 用户已在会话中提供（形如 `ghp_...`）；`gh` 需 `GH_TOKEN=` 前缀，或写进 push URL。**不要把 token 写进仓库文件——GitHub push protection 会拦截** |
 | Docker Hub | 账号 `ahmadplayz721`；token 形如 `dckr_pat_...`，由用户提供，**不入库** |
@@ -34,7 +34,7 @@
 
 - 需要时向用户索取，或从本机 `~/.ssh/` / 环境变量取。
 - 会话内临时脚本放在 `/tmp/`（不入库），用完删。
-- 历史上 `docs/HANDOFF.md` 曾明文写入 SSH 密码（提交 `f096a24` 引入，提交 `cae0c34` 移除）；该密码已出现在 public 仓库历史中，**用户需自行更换**，详见 `docs/memory-audit-kit/lessons.md` §34。
+- 历史上 `docs/HANDOFF.md` 曾明文写入 SSH 密码（提交 `f096a24` 引入，本轮 `fix(docs)` 提交移除）；该密码已出现在 public 仓库历史中，**用户需自行更换**，详见 `docs/memory-audit-kit/lessons.md` §34。
 
 ---
 
@@ -227,7 +227,7 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 
 随后把 tag `2.0.7-beta-perf` 从 `8126729` 重建到 `2f91136`（`git tag -d` 与 `git push --force` 都会被 CC Safety Net 拦，用 `git tag -f -a` + `--force-with-lease`）。实测 tag 上四个文件 raw URL 全部 HTTP 200：`install.sh` 15,084 B、`panel_install.sh` 10,347 B、`docker-compose-v4.yml` 2,055 B（含 `TrimNativeHeapInterval`）、`docker-compose-v6.yml` 2,313 B；`install.sh` 的 `MEM_LIMIT` 缺省为 `512MiB`、`AGENT_RELEASE_TAG="2.0.7-beta-perf"`，`panel_install.sh` 的 `COMPOSE_REF` 为 `refs/tags/2.0.7-beta-perf`。
 
-### 2.17 凭据清理与统计口径校正（提交 `cae0c34`）
+### 2.17 凭据清理与统计口径校正
 
 复核阶段发现并修掉四类问题：
 
@@ -236,7 +236,7 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 3. **kit 计数**：`lessons.md` 33→34 条（新增第 34 条并移入「工具与安全网类」）、`prompt.md` 标为「20 节正文 + 附录」。
 4. **arena 旧数字缺就近脚注**：`CODE_CHANGELOG.md`、`PERFORMANCE_COMPARISON.md`、`MEMORY_ROOT_CAUSE_ANALYSIS.md` 与本文件中的 `235.4 / 140.2 MB` 均补「含 G1 堆基址约 73 MB，扣后约 162 → 63 MB」。
 
-验证：三处远程引用（两分支 + tag）同指 `cae0c34`；三条 raw URL 的 `HANDOFF.md` 明文密码命中数均为 0；`wc -l` 九份文档 8,771 行。
+验证：三处远程引用（两分支 + tag）同指同一提交；三条 raw URL 的 `HANDOFF.md` 明文密码命中数均为 0；`wc -l` 九份文档 8,771 行。
 
 ### 2.16 收尾状态（2026-11-10 05:20 实测）
 
@@ -361,7 +361,7 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 | 前端镜像 | 同后端，`docker compose up -d frontend` 前把 tag 指回旧 digest |
 | 代码 | `git revert 124a96e fc45e60 851aedc abb5cec a2b97b5 97f17c6 74d1d33 fd911c7 5da3070 156bfc9 264a035 656c897 7d1e603 e4d6ecb be67a16 d2e38b9 b29282d d7e63e8 d843617 7473a73 cc61535 e34660d 556b96d`（各提交相互独立，可单独回滚） |
 
-旧后端镜像 digest：`sha256:12d65638…`（当前，含批量清理 + Trim + arena）→ `sha256:e301f7cc…`（批量清理，Dockerfile 仍重复 ENV）→ `sha256:ff40dbd6…`（含 arena 限制 + 原生内存归还）→ `sha256:b2224ff1…`（仅 arena 限制）→ `sha256:5e83ee24…`（Hikari + get_port 守卫）→ `sha256:836feb7c…` → `sha256:b0ee363d…`（脱敏版）→ `sha256:607a3beb…` → `sha256:580f0784…` → `sha256:c42978b6…`（第五轮，2026-11-01）→ `sha256:0a4d617a…`。
+旧后端镜像 digest：`sha256:95c0624c…`（**当前运行**，含 @Async 上界 + 批量清理 + Trim + arena）→ `sha256:12d65638…`（批量清理 + Trim + arena）→ `sha256:e301f7cc…`（批量清理，Dockerfile 仍重复 ENV）→ `sha256:ff40dbd6…`（含 arena 限制 + 原生内存归还）→ `sha256:b2224ff1…`（仅 arena 限制）→ `sha256:5e83ee24…`（Hikari + get_port 守卫）→ `sha256:836feb7c…` → `sha256:b0ee363d…`（脱敏版）→ `sha256:607a3beb…` → `sha256:580f0784…` → `sha256:c42978b6…`（第五轮，2026-11-01）→ `sha256:0a4d617a…`。
 
 > **回滚 arena 限制**：`git revert 264a035` 后重新 `docker build` + `push` + `compose up -d backend`。arena 限制只影响 glibc 分配策略，回滚不会改动任何业务数据。
 >
@@ -398,10 +398,10 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 
 | 项 | 数值 |
 | --- | --- |
-| 提交数 | 43（`556b96d^..HEAD`） |
+| 提交数 | 44（`git rev-list --count 556b96d^..HEAD`） |
 | 改动文件 | 95（docs 13 + 其余 82） |
 | 后端单测 | 114 例全过（原 95 例） |
-| 九份交付文档 | 8,771 行（`wc -l` 实测，含本文件 396 行） |
+| 九份交付文档 | 8,782 行（`wc -l` 实测，含本文件 407 行） |
 | 复用包 | 4 份（README / prompt / lessons / reusability） |
 | 镜像 | backend `sha256:95c0624c…`（当前运行）、frontend `sha256:02d1ee31…` |
 | Docker 磁盘 | `image prune` 回收 2.473 GB（22 个 6.062 GB → 6 个 3.588 GB） |
