@@ -405,3 +405,15 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 | 复用包 | 4 份（README / prompt / lessons / reusability） |
 | 镜像 | backend `sha256:95c0624c…`（当前运行）、frontend `sha256:02d1ee31…` |
 | Docker 磁盘 | `image prune` 回收 2.473 GB（22 个 6.062 GB → 6 个 3.588 GB） |
+
+## 8. 生产机重装系统
+
+重装手册见 [`docs/REINSTALL_PLAYBOOK.md`](REINSTALL_PLAYBOOK.md)（578 行，含资产清单、备份验证、12 步恢复流程、账号凭据位置、重装不解决的问题）。
+
+**备份位置**：服务器 `/root/flux_reinstall_backup_20261110-171528.tar.gz`（107,476,382 B，SHA-256 `774eb2cc…3d4ca1`）；本地 `/root/flux_reinstall_backup/` 同名校验一致。
+
+**备份已验证**：`pragma integrity_check` = `ok`；`node=5 / forward=193 / forward_port=193 / tunnel=2 / user=1 / forward_flow_statistics=87,938`；`JWT_SECRET` 已入包；`config.json` 的 secret 与 `node.id=2.secret` 实测 MATCH。
+
+**重装会丢的只有 4 样**：`JWT_SECRET`、`gost.db`、`config.json` 的 secret、1Panel 面板数据。其余（镜像、内核、sysctl、脚本）都能重建。
+
+**重装前必须做**：① 把备份包 `scp` 到自己电脑并核对 SHA-256；② 确认云厂商安全组/EIP/快照；③ 重装后立刻改 SSH（禁 root 密码登录、开密钥）。
