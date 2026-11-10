@@ -1,14 +1,15 @@
-# 交接说明：Flux Panel 隧道断流 / 旧连接残留修复
+# 交接说明：Flux Panel 内存审计 / 隧道断流 / 旧连接残留修复
 
 > 给下一个会话看的进度快照。读完这一页即可继续，不需要回看原对话。
-> 最后更新：2026-11-10 05:20（Asia/Shanghai）
+> 最后更新：2026-11-10 10:35（Asia/Shanghai）
 > 上一个交接（端口流量排行功能）：`docs/port-flow-ranking/handoff.md`
+> 复用资产（任务书 / 踩坑 / 通用与替换项）：`docs/memory-audit-kit/README.md`
 
 ---
 
 ## 一句话现状
 
-后端十三批缺陷/性能修复 + Go agent 连接生命周期与日志脱敏 + 前端 24 个 lint error + Java 堆外内存两轮压缩（glibc arena 上限、TrimNativeHeapInterval）全部已上线生产，`restarts=0`、`oom=false`、`v4/v6/front` 全 200。当前 Java RSS 约 230–270 MB（原 373 MB），agent RSS 约 50 MB（原 110–123 MB）。
+后端十三批缺陷/性能修复 + Go agent 连接生命周期与日志脱敏 + 前端 24 个 lint error + Java 堆外内存两轮压缩（glibc arena 上限、TrimNativeHeapInterval）全部已上线生产，`restarts=0`、`oom=false`、`v4/v6/front` 全 200。当前 Java RSS 约 230–270 MB（原 373 MB），agent RSS 约 50 MB（原 110–123 MB）。**本轮共 40 个提交、91 个文件，全部已推送，`fix/transport-ctx-cancel` = `feat/port-traffic-ranking` = tag `2.0.7-beta-perf` 三处同指 `ddb501d`。**
 
 ---
 
@@ -234,6 +235,8 @@ GitHub Release `2.0.7-beta-perf` 的 `gost-amd64`（32,092,312 B，`sha256:e7fa5
 
 ## 3. 待完成
 
+> 顺序建议：**先决策 P0，再动 P1**。P1 的三条互相独立，可并行；P2 只在换基线或用户改口时再动。
+
 ### P0 — 需要决策/授权
 
 1. **`failTimeout` 新值还没生效**。源码已改 30 秒，但生产 `/etc/flux_agent/gost.json` 的 `hop_7.selector.failTimeout` 仍是 `600000000000`。
@@ -346,3 +349,40 @@ docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp \
 > **回滚原生内存归还**：`git revert 851aedc abb5cec`，或只改生产 `/root/docker-compose.yml` 去掉 `-XX:TrimNativeHeapInterval=15000` 后 `docker compose up -d backend`（无需重新构建镜像）。回滚后 RSS 会回到约 300 MB。
 >
 > **回滚批量清理**：`git revert 124a96e` 后重建镜像。回滚后每轮配置上报会重新变成「每 service 一条 SELECT」——功能等价，只是查询数回升，**不会影响数据正确性**。
+
+---
+
+## 7. 复用资产
+
+本轮的「审计方法」已单独沉淀，不随本文件生命周期结束：
+
+| 文件 | 内容 |
+| --- | --- |
+| `docs/memory-audit-kit/README.md` | 索引 + 这次三个根因的一句话版 + 三条最容易犯的错 |
+| `docs/memory-audit-kit/prompt.md` | 完整任务书（20 节 + 占位符替换表），下次整段复制即可开工 |
+| `docs/memory-audit-kit/lessons.md` | 33 条踩坑与解法（测量口径 / 代码缺陷 / 配置环境 / 工具安全网） |
+| `docs/memory-audit-kit/reusability.md` | 通用步骤 vs 下次替换项 + 决策树 + 可复用脚本 |
+| Skill `production-memory-audit` | 已提交待确认；装进技能库后可被自动匹配 |
+
+**新开对话时贴这段即可接上：**
+
+```text
+上一轮已完成 Flux Panel 的内存审计与优化，全部上线。现在继续。
+先读 docs/HANDOFF.md（进度/待办/踩坑/恢复/回滚），
+再读 docs/memory-audit-kit/lessons.md（测量口径陷阱）。
+不要重复已完成部分，直接从 P0 开始。
+约束：不改功能与接口、不动数据、不换技术栈；结论必须有实测证据；
+未实测标「未测试」；改安装脚本或 compose 后必须重建 tag。
+```
+
+### 7.1 本轮最终规模
+
+| 项 | 数值 |
+| --- | --- |
+| 提交数 | 40（`556b96d^..ddb501d`） |
+| 改动文件 | 91 |
+| 后端单测 | 114 例全过（原 95 例） |
+| 九份交付文档 | 8,723 行 |
+| 复用包 | 4 份（README / prompt / lessons / reusability） |
+| 镜像 | backend `sha256:95c0624c…`（当前运行）、frontend `sha256:02d1ee31…` |
+| Docker 磁盘 | `image prune` 回收 2.473 GB（22 个 6.062 GB → 6 个 3.588 GB） |
