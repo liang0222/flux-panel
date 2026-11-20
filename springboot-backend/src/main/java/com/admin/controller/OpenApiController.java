@@ -8,14 +8,13 @@ import javax.servlet.http.HttpServletResponse;
 import com.admin.common.utils.Md5Util;
 import com.admin.entity.User;
 import com.admin.entity.UserTunnel;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Objects;
 
 @RestController
-@CrossOrigin
 @RequestMapping("/api/v1/open_api")
 public class OpenApiController extends BaseController {
 

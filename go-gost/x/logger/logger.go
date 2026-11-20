@@ -197,3 +197,11 @@ func (l *logrusLogger) caller(skip int) string {
 	}
 	return fmt.Sprintf("%s:%d", file, line)
 }
+
+// WrapDefault gives the core logger's atomic.Value a stable concrete type
+// across configuration changes, including switches to a no-op logger.
+func WrapDefault(log logger.Logger) logger.Logger {
+	return &defaultLogger{Logger: log}
+}
+
+type defaultLogger struct{ logger.Logger }

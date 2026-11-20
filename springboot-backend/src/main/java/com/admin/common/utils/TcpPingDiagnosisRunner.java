@@ -3,7 +3,7 @@ package com.admin.common.utils;
 import com.admin.common.dto.DiagnosisResult;
 import com.admin.common.dto.GostDto;
 import com.admin.entity.Node;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONObject;
 import lombok.extern.slf4j.Slf4j;
 
 /**

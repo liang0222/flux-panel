@@ -63,7 +63,7 @@ func (p *parser) Parse() (*config.Config, error) {
 	}
 	cfg = mergeConfig(cfg, cmdCfg)
 
-	if len(cfg.Services) == 0 && p.args.ApiAddr == "" && cfg.API == nil {
+	if cfgFile == "" && len(cfg.Services) == 0 && p.args.ApiAddr == "" && cfg.API == nil {
 		if err := cfg.Load(); err != nil {
 			return nil, err
 		}

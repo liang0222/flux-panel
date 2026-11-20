@@ -6,7 +6,6 @@ import com.admin.common.dto.ForwardFlowQueryDto;
 import com.admin.common.lang.R;
 import com.admin.common.utils.FlowStatisticsRange;
 import com.admin.service.ForwardFlowStatisticsService;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -23,7 +22,6 @@ import javax.annotation.Resource;
  * @since 2.0.7-beta
  */
 @RestController
-@CrossOrigin
 @RequestMapping("/api/v1/forward-flow")
 public class ForwardFlowController extends BaseController {
 

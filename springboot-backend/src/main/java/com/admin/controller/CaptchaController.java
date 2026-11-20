@@ -22,7 +22,6 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 @Slf4j
 @RestController
-@CrossOrigin
 @RequestMapping("/api/v1/captcha")
 public class CaptchaController extends BaseController {
 

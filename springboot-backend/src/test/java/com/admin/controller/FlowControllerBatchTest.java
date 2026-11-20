@@ -11,13 +11,17 @@ import com.admin.service.NodeService;
 import com.admin.service.TunnelService;
 import com.admin.service.UserService;
 import com.admin.service.UserTunnelService;
-import com.alibaba.fastjson.JSONArray;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -91,6 +95,10 @@ class FlowControllerBatchTest {
         controller.nodeService = nodeService;
         controller.chainTunnelService = chainTunnelService;
         controller.realtimeFlowTracker = new RealtimeFlowTracker();
+        controller.jdbcTemplate = mock(JdbcTemplate.class);
+        controller.flowTransaction = mock(TransactionTemplate.class);
+        when(controller.flowTransaction.execute(any())).thenAnswer(invocation ->
+                invocation.<TransactionCallback<?>>getArgument(0).doInTransaction(new SimpleTransactionStatus()));
 
         when(nodeService.existsBySecret(SECRET)).thenReturn(true);
     }
@@ -247,9 +255,9 @@ class FlowControllerBatchTest {
 
         ArgumentCaptor<Wrapper> captor = ArgumentCaptor.forClass(Wrapper.class);
         verify(forwardService, times(2)).update(any(), captor.capture());
-        assertTrue(sqlSet(captor.getAllValues().get(0)).contains("out_flow = out_flow + 100"));
-        assertTrue(sqlSet(captor.getAllValues().get(1)).contains("out_flow = out_flow + 200"));
-        assertTrue(sqlSet(captor.getAllValues().get(1)).contains("in_flow = in_flow + 50"));
+        assertTrue(sqlSet(captor.getAllValues().get(0)).contains("out_flow = COALESCE(out_flow, 0) + 100"));
+        assertTrue(sqlSet(captor.getAllValues().get(1)).contains("out_flow = COALESCE(out_flow, 0) + 200"));
+        assertTrue(sqlSet(captor.getAllValues().get(1)).contains("in_flow = COALESCE(in_flow, 0) + 50"));
     }
 
     @Test
@@ -267,8 +275,8 @@ class FlowControllerBatchTest {
         ArgumentCaptor<Wrapper> captor = ArgumentCaptor.forClass(Wrapper.class);
         verify(forwardService).update(any(), captor.capture());
         String sql = sqlSet(captor.getValue());
-        assertTrue(sql.contains("in_flow = in_flow + 300"), "入站应为 100*1.5*2=300，实际：" + sql);
-        assertTrue(sql.contains("out_flow = out_flow + 120"), "出站应为 40*1.5*2=120，实际：" + sql);
+        assertTrue(sql.contains("in_flow = COALESCE(in_flow, 0) + 300"), "入站应为 100*1.5*2=300，实际：" + sql);
+        assertTrue(sql.contains("out_flow = COALESCE(out_flow, 0) + 120"), "出站应为 40*1.5*2=120，实际：" + sql);
     }
 
     @Test

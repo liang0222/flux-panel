@@ -10,7 +10,7 @@ import com.admin.common.utils.WebSocketServer;
 import com.admin.entity.*;
 import com.admin.mapper.NodeMapper;
 import com.admin.service.*;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import org.springframework.context.annotation.Lazy;

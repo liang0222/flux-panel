@@ -6,7 +6,7 @@ import {
   NavbarContent,
 } from "@heroui/navbar";
 import { isWebViewFunc } from '@/utils/panel';
-import { useNavigate } from "react-router-dom";
+import { Link as RouterLink, useNavigate } from "react-router-dom";
 
 import { Logo } from "@/components/icons";
 import { siteConfig, getCachedConfig } from "@/config/site";
@@ -70,7 +70,8 @@ export const Navbar = () => {
             <Link
               className="flex justify-start items-center gap-2 max-w-[200px] sm:max-w-none"
               color="foreground"
-              href="/"
+              as={RouterLink}
+              to="/"
             >
               <Logo size={24} />
               <p className="font-bold text-inherit truncate">{appName}</p>

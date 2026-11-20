@@ -4,11 +4,16 @@
 >
 > **本页默认路径：源码或镜像直接上服务器，一次搞定，不依赖 GitHub Actions，也不推任何镜像仓库。**
 
-## 0. 先明确三件事
+## 0. 整改分支升级检查
 
-1. **改动只在面板**（后端 + 前端），节点端 gost 二进制未变 → 节点继续用官方 `2.0.7-beta` 安装脚本。
-2. **官方预构建镜像 `bqlpfy/*:2.0.7-beta` 不包含你的改动** → 必须用你自己的构建产物（当前产物含「端口流量排行」与「仪表盘实时速率」两期功能）。
-3. **不需要数据库迁移**：新表随 `schema.sql` 启动时自动创建；数据在 `sqlite_data` 卷里，升级不丢。
+1. 先确认镜像或二进制确实由待部署源码构建。历史 `2.0.7-beta` 同名镜像和旧节点二进制不会自动获得本轮修复。
+2. 用 SQLite `.backup` 生成一致性备份，核对 `PRAGMA integrity_check`，保留备份和原 Compose 项目、数据卷及上一个可用镜像。后端继续单实例运行，切勿将同一个数据库卷同时挂载给多个写入后端。
+3. 先升级面板并验证健康，再按批次升级 Go agent。旧 agent 仍走兼容上报路径，新 agent 才会携带批次标识。升级后核对历史排行、仪表盘实时速率、正常上报与节点配置。新增表和索引由 `schema.sql` 初始化。
+4. 已使用强随机 `JWT_SECRET` 的部署保留原值，避免现有令牌失效。新安装用 `openssl rand -hex 32` 生成。替换旧弱密钥时，安排用户重新登录。先在本机或可信管理网络完成首次设置和管理员改密，再开通外部访问。
+5. 本地 Compose 默认绑定回环。按需要显式设置 `FRONTEND_BIND_IP`、`BACKEND_BIND_IP` 或使用 HTTPS 代理。跨域页面与代理终止 TLS 场景按浏览器实际使用的来源配置 `PANEL_ALLOWED_ORIGINS`，如 `https://panel.example.com`。用逗号分隔，使用非默认端口时带上端口。Android 内置来源已支持。仅在验证对应 iOS 壳确需 `Origin: null` 后按部署选择是否配置 `null`。所有实际代理层的访问和错误日志都要单独核对。
+6. 将旧数据恢复到隔离副本后先做验证。需要恢复到原服务时，先停写入方，保留当前数据库及相关文件的副本，再使用已检查的一致性备份，避免让新旧 WAL 文件混用。
+
+本轮本地验证与现场待验项见 [审计整改验收](audit-remediation.md)。脚本安装、升级及回滚的操作约束见 [面板部署与升级](../../deploy/README.md)。
 
 ## 1. 方式 A1：把源码放到服务器上构建（最省事）
 
@@ -21,8 +26,10 @@ rsync -av --exclude node_modules --exclude target --exclude dist \
 
 # 2) 服务器上
 cd /opt/flux-panel/deploy
-cp .env.example .env
-sed -i "s/change-me-to-a-random-string/$(openssl rand -hex 16)/" .env
+# 仅首次安装，保留已有部署的 .env 和随机密钥。
+if [ ! -e .env ]; then
+  (umask 077; sed "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" .env.example > .env)
+fi
 
 # 3) 一键构建并启动（首次约 5~10 分钟）
 docker compose up -d --build
@@ -38,7 +45,7 @@ docker compose ps
 | [deploy/rebuild.sh](../../deploy/rebuild.sh) | 以后更新只需 `./rebuild.sh`（build + up + 状态） |
 | `springboot-backend/.dockerignore`、`vite-frontend/.dockerignore` | 避免把 `target/`、`node_modules/`、`dist/` 打进构建上下文 |
 
-访问 `http://<服务器IP>:6366`，默认账号 `admin_user / admin_user`（登录后立即改）。
+新装时面板默认监听服务器的 `127.0.0.1:6366`。在服务器本机、经 SSH 转发，或经可信 HTTPS 反代进入面板。完成首次管理账户设置与改密后再开放远程访问。
 
 ## 2. 方式 A2：本地构建 → 导出镜像 → 服务器加载（服务器可断网、无源码）
 
@@ -50,15 +57,18 @@ cd deploy
 ./export-images.sh
 # 产出 flux-panel-images-2.0.7-beta.tar（约 201 MB）
 
-# 传到服务器
-scp flux-panel-images-2.0.7-beta.tar docker-compose.yml .env user@server:/opt/flux-panel/
+# 首次部署时传镜像和模板，升级前先核对目标 Compose 项目及现有配置。
+scp flux-panel-images-2.0.7-beta.tar docker-compose.yml .env.example user@server:/opt/flux-panel/
 # 服务器上
 cd /opt/flux-panel
+if [ ! -e .env ]; then
+  (umask 077; sed "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" .env.example > .env)
+fi
 docker load -i flux-panel-images-2.0.7-beta.tar
-docker compose up -d          # 注意：不要加 --build，直接用已加载的镜像
+docker compose up -d --no-build --pull never
 ```
 
-> `.env` 里必须有 `JWT_SECRET`（`openssl rand -hex 16`）。以后更新：本地重新 `./export-images.sh` → 传 tar → `docker load` → `docker compose up -d`，数据卷不变。
+升级时保留服务器的 `.env`、Compose 项目名和现有数据卷。先按第 0 节做一致性备份，再加载新镜像并验证。
 
 ## 3. 方式 B：镜像仓库 / GitHub Actions（可选）
 
@@ -79,17 +89,20 @@ docker buildx build --platform linux/amd64 -t docker.io/<USER>/flux-panel-fronte
 服务器侧直接用 [deploy/docker-compose.registry.yml](../../deploy/docker-compose.registry.yml)（无 `build:`，只拉镜像）：
 
 ```bash
-cd deploy && cp .env.example .env    # 填 JWT_SECRET
+cd deploy
+if [ ! -e .env ]; then
+  (umask 077; sed "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" .env.example > .env)
+fi
 docker compose -f docker-compose.registry.yml pull
 docker compose -f docker-compose.registry.yml up -d
 ```
 
-要自己重新推送：`cd deploy && ./push-images.sh`（默认用户 `ahmadplayz721`、版本 `2.0.7-beta`、amd64，可用 `VERSION=` / `PLATFORM=` 覆盖）。CI 的注意事项见第 6.6 节。
+要自己重新推送：`cd deploy && ./push-images.sh`（默认用户 `ahmadplayz721`、版本 `2.0.7-beta`、amd64，可用 `VERSION=` / `PLATFORM=` 覆盖）。CI 的注意事项见第 6.4 节。
 
 ## 4. 方式 C：不用 Docker（jar + nginx）
 
 ```bash
-cd springboot-backend && mvn -B clean package -DskipTests
+cd springboot-backend && mvn -B clean verify
 mkdir -p /opt/flux-panel/{data,logs}
 cp target/admin-0.0.1-SNAPSHOT.jar /opt/flux-panel/app.jar
 
@@ -160,7 +173,7 @@ nginx 用仓库自带 [nginx.conf](../../vite-frontend/nginx.conf)，`root` 指�
 
 ## 6. 上传到自己的 GitHub（可选，仅用于备份/分发/协作）
 
-### 6.1 先提交（当前改动还未提交）
+### 6.1 历史提交示例（仅供旧排行分支参考）
 
 ```bash
 cd /root/v2.0.7-beta
@@ -184,7 +197,8 @@ git commit -m "docs: 排行榜任务说明、部署与交接"
 ```bash
 git remote rename origin upstream
 git remote add origin git@github.com:<YOU>/flux-panel.git
-git push -u origin feat/port-traffic-ranking   # 先只推功能分支，避免触发 CI
+# 历史示例。该分支当前可触发镜像发布，单纯验证请用其他分支。
+git push -u origin feat/port-traffic-ranking
 ```
 
 认证：SSH 公钥，或 HTTPS + PAT（勾 `repo`）。
@@ -196,18 +210,11 @@ git push origin 2.0.7-beta:refs/tags/2.0.7-beta
 git push --all origin && git push --tags origin
 ```
 
-### 6.4 CI 必改项（否则会失败或推到原作者命名空间）
+### 6.4 当前 CI 与发布条件
 
-[.github/workflows/docker-build.yml](../../.github/workflows/docker-build.yml) 里硬编码了：
+[.github/workflows/docker-build.yml](../../.github/workflows/docker-build.yml) 在各分支的代码变更推送、PR 和手动运行时执行 Maven `verify`、双 Go 模块竞态测试和安装器测试。Linux amd64/arm64 Agent 与 `SHA256SUMS` 上传为 Actions artifacts。仅 `main` 和 `feat/port-traffic-ranking` 的非 PR 运行进入面板镜像发布判定，且须通过前置验证。镜像目标为 `ahmadplayz721/flux-panel-*`，登录使用 `DOCKER_HUB_USERNAME` / `DOCKER_HUB_TOKEN`。该工作流不自动创建 Git tag 或 GitHub Release。
 
-- 触发：`on.push.branches: [main, beta]`
-- 版本：`env.VERSION: "2.0.7-beta"`
-- 镜像：`bqlpfy/springboot-backend`、`bqlpfy/vite-frontend`
-- 登录：`secrets.DOCKER_HUB_USERNAME` / `DOCKER_HUB_TOKEN`
-- `create-release` 会 `git tag 2.0.7-beta && git push` 并创建 Release
-
-若不走镜像仓库：把该工作流改名停用（`docker-build.yml.disabled`），或先不推 main/beta。
-若要走：改镜像名为自己的命名空间、配 secrets、删掉或改版本号避免 tag 冲突。
+如只需 CI 验证，可使用其他分支的 PR。分叉仓库需要单独检查镜像命名空间、版本 tag 和发布凭据。
 
 ### 6.5 与上游同步
 
@@ -230,13 +237,12 @@ git fetch upstream && git checkout main && git merge upstream/main
 
 ## 8. 如果要把面板发给别人用
 
-官方脚本与后端里有多处 `bqlpfy` 硬编码，自建分发时需要改：
+发布面板和 Agent 前，核对以下位置引用的是本次通过验收的产物：
 
-| 位置 | 内容 |
+| 位置 | 当前行为 |
 | --- | --- |
-| `panel_install.sh` | 下载 `bqlpfy/flux-panel` 的 compose；镜像名在 compose 里 |
-| `install.sh` | 节点端从 `bqlpfy/flux-panel/releases/download/2.0.7-beta/gost-*` 下载 |
-| `springboot-backend/.../NodeServiceImpl.java:129` | 面板展示的节点安装命令硬编码上游 release 地址 |
-| `docker-compose-v4/v6.yml` | `image: bqlpfy/*` |
+| [面板安装器](../../panel_install.sh) 与 [IPv4 模板](../../docker-compose-v4.yml)、[双栈模板](../../docker-compose-v6.yml) | 默认使用 `ahmadplayz721/flux-panel-*`，支持显式指定前后端镜像 |
+| [Agent 安装器](../../install.sh) | 使用现有带固定 SHA-256 的发布资产。发布新 Agent 时同步更新下载目标和各架构摘要 |
+| [节点安装命令](../../springboot-backend/src/main/java/com/admin/service/impl/NodeServiceImpl.java#L124) | 面板仍生成指向现有 `2.0.7-beta-perf` 标签的命令。本轮 Agent 发布后需同步更新引用 |
 
-只给自己用可以不改：面板用你自己的构建产物，节点继续用官方二进制（本功能不依赖节点改动）。
+只升级面板时，旧 Agent 仍可兼容上报。批次去重、退出补发及 Agent 生命周期修复需要更新节点二进制。先升级并验证面板，再分批升级节点。

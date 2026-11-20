@@ -3,7 +3,7 @@ package com.admin.service;
 import com.admin.common.utils.JwtUtil;
 import com.admin.entity.Node;
 import com.admin.entity.User;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,7 +38,7 @@ class FlowRateIntegrationTest {
                 "flux-rate-test-" + UUID.randomUUID() + ".db").toString();
         registry.add("spring.datasource.url", () -> "jdbc:sqlite:" + dbFile);
         registry.add("spring.sql.init.mode", () -> "always");
-        registry.add("jwt-secret", () -> "rate-test-secret");
+        registry.add("jwt-secret", () -> "fixture-only-rate-jwt-key-4f8dbc1bc96375");
         registry.add("log-dir", () -> Paths.get(System.getProperty("java.io.tmpdir"), "flux-rate-test-logs").toString());
     }
 

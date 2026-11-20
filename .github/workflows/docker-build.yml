@@ -1,152 +1,135 @@
-name: Build and Push Images Based on Version
-
-# 在这里定义统一版本号
-env:
-  VERSION: "2.0.7-beta"
+name: Verify and build release artifacts
 
 on:
   push:
-    branches:
-      - main
-      - feat/port-traffic-ranking
-    # 纯文档改动不重建镜像（多架构构建约 10 分钟），需要时用 workflow_dispatch 手动触发
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
+    branches: ['**']
+    paths-ignore: ['docs/**', '**.md']
+  pull_request:
+    paths-ignore: ['docs/**', '**.md']
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+env:
+  VERSION: '2.0.7-beta'
+
 jobs:
-  check-version:
-    name: Check Version and Decide Build
+  verify-java:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+          cache-dependency-path: springboot-backend/pom.xml
+      - name: Run Maven tests and package
+        working-directory: springboot-backend
+        run: mvn -B -ntp clean verify
+
+  verify-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache-dependency-path: |
+            go-gost/go.sum
+            go-gost/x/go.sum
+      - name: Race tests for the agent module
+        working-directory: go-gost
+        run: go test -race ./...
+      - name: Race tests for the nested transport module
+        working-directory: go-gost/x
+        run: go test -race ./...
+      - name: Build Linux release binaries and checksums
+        working-directory: go-gost
+        shell: bash
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags '-s -w' -o "dist/gost-$arch" .
+          done
+          cd dist
+          sha256sum gost-amd64 gost-arm64 > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gost-linux-${{ github.sha }}
+          path: go-gost/dist/
+          if-no-files-found: error
+
+  verify-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check installer rollbacks and Compose configurations
+        run: bash deploy/test-installers.sh
+
+  panel-changes:
+    # Test every branch and PR. Preserve the original two release branches for registry pushes.
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/port-traffic-ranking')
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ env.VERSION }}
-      should_build: ${{ steps.check-tag.outputs.should_build }}
-      should_build_gost: ${{ steps.check-tag.outputs.should_build_gost }}
-      tag_exists: ${{ steps.check-tag.outputs.tag_exists }}
+      images: ${{ steps.check.outputs.images }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Display version
+          persist-credentials: false
+      - id: check
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
-          echo "Current version: ${{ env.VERSION }}"
-
-      - name: Check if tag exists and detect changes
-        id: check-tag
-        run: |
-          if git rev-parse "${{ env.VERSION }}" >/dev/null 2>&1; then
-            echo "Tag ${{ env.VERSION }} already exists"
-            echo "tag_exists=true" >> $GITHUB_OUTPUT
-
-            # 检查从tag到现在，面板源码（后端/前端）是否有变化
-            TAG_COMMIT=$(git rev-list -n 1 "${{ env.VERSION }}")
-            echo "Tag commit: $TAG_COMMIT"
-            echo "Current HEAD: $(git rev-parse HEAD)"
-
-            # 标签存在不等于镜像是最新的：只要面板源码相对标签有改动就必须重建，
-            # 否则推送新代码后流水线仍然显示成功，但镜像仓库里还是旧镜像。
-            if git diff --quiet --ignore-all-space --ignore-blank-lines $TAG_COMMIT HEAD -- springboot-backend/ vite-frontend/ 2>/dev/null; then
-              echo "✅ Panel sources unchanged since tag (no content changes)"
-              echo "should_build=false" >> $GITHUB_OUTPUT
-            else
-              echo "🔄 Detected changes in panel sources since tag, will rebuild:"
-              git diff --stat $TAG_COMMIT HEAD -- springboot-backend/ vite-frontend/ || true
-              echo "should_build=true" >> $GITHUB_OUTPUT
+          images=()
+          base=$(git rev-parse --verify "refs/tags/${VERSION}^{commit}" 2>/dev/null || true)
+          for component in backend frontend; do
+            case "$component" in
+              backend) dir=springboot-backend ;;
+              frontend) dir=vite-frontend ;;
+            esac
+            if [[ "$EVENT" == workflow_dispatch || -z "$base" ]] || ! git diff --quiet "$base" HEAD -- "$dir/"; then
+              images+=("$component")
             fi
-            
-            # 检查 go-gost 目录下是否有实际的文件内容变化
-            # 使用 --ignore-all-space 和 --ignore-blank-lines 来忽略空白差异
-            # 使用 --exit-code: 0表示无差异，1表示有差异
-            if git diff --quiet --ignore-all-space --ignore-blank-lines $TAG_COMMIT HEAD -- go-gost/ 2>/dev/null; then
-              echo "✅ GOST files unchanged since tag (no content changes)"
-              echo "should_build_gost=false" >> $GITHUB_OUTPUT
-            else
-              # 显示差异以便调试
-              echo "🔄 Detected changes in go-gost directory:"
-              git diff --stat $TAG_COMMIT HEAD -- go-gost/ || true
-              echo "should_build_gost=true" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "Tag ${{ env.VERSION }} does not exist, will build all components"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "should_build_gost=true" >> $GITHUB_OUTPUT
-            echo "tag_exists=false" >> $GITHUB_OUTPUT
-          fi
+          done
+          python3 -c 'import json, sys; print("images=" + json.dumps(sys.argv[1:]))' "${images[@]}" >> "$GITHUB_OUTPUT"
 
-  build-vite:
-    name: Build & Push Vite Frontend
-    needs: check-version
-    if: needs.check-version.outputs.should_build == 'true'
+  publish-panel-images:
+    needs: [verify-java, verify-go, verify-deploy, panel-changes]
+    if: needs.panel-changes.outputs.images != '[]'
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: ${{ fromJSON(needs.panel-changes.outputs.images) }}
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
         with:
-          node-version: 20
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Log in to DockerHub
-        uses: docker/login-action@v2
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build and push Vite Docker images
+      - name: Build and push panel image
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.component }}
         run: |
-          VERSION="${{ needs.check-version.outputs.version }}"
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --push \
-            -t ahmadplayz721/flux-panel-frontend:latest \
-            -t ahmadplayz721/flux-panel-frontend:${VERSION} \
-            ./vite-frontend
-
-  build-java:
-    name: Build & Push Spring Boot Backend
-    needs: check-version
-    if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up JDK and Maven
-        uses: actions/setup-java@v3
-        with:
-          java-version: 21
-          distribution: 'temurin'
-
-      - name: Cache Maven dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.m2
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: ${{ runner.os }}-m2
-
-      - name: Build Java JAR
-        working-directory: ./springboot-backend
-        run: mvn clean package -DskipTests
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Log in to DockerHub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build and push Java Docker images
-        run: |
-          VERSION="${{ needs.check-version.outputs.version }}"
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --push \
-            -t ahmadplayz721/flux-panel-backend:latest \
-            -t ahmadplayz721/flux-panel-backend:${VERSION} \
-            ./springboot-backend
+          case "$COMPONENT" in
+            backend) dir=springboot-backend ;;
+            frontend) dir=vite-frontend ;;
+            *) exit 1 ;;
+          esac
+          docker buildx build --platform linux/amd64,linux/arm64 --push \
+            -t "ahmadplayz721/flux-panel-${COMPONENT}:latest" \
+            -t "ahmadplayz721/flux-panel-${COMPONENT}:${VERSION}" "./$dir"

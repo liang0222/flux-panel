@@ -1,93 +1,77 @@
 #!/bin/bash
 
-# 获取系统架构
-get_architecture() {
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64)
-            echo "amd64"
-            ;;
-        aarch64|arm64)
-            echo "arm64"
-            ;;
-        *)
-            echo "amd64"  # 默认使用 amd64
-            ;;
-    esac
-}
-
-# ---- 下载源配置 ----
-# 主下载源：本仓库发布的自建二进制。
-# 相对上游的差异：内置 GOMEMLIMIT 堆软上限（缺省 512MiB，可用 GOMEMLIMIT 或
-# FLUX_AGENT_MEMLIMIT 覆盖，off/0 关闭）、service 包不再 log.Fatal（可单元测试）、
-# -V 版本输出可用、修正两处 fmt.Println 格式化动词误用。业务逻辑与上游一致。
+# 摘要来自相应 GitHub Release 资产元数据，固定在脚本内；镜像站只负责传输。
 AGENT_REPO="liang0222/flux-panel"
 AGENT_RELEASE_TAG="2.0.7-beta-perf"
-# 备用下载源：上游同版本二进制。本仓库 Release 不可达时自动回退，
-# 保证安装不因单一下载源故障而中断（此时不含上述自建改进）。
 UPSTREAM_REPO="bqlpfy/flux-panel"
 UPSTREAM_RELEASE_TAG="2.0.7-beta"
-
-# 构建主下载地址（可用 FLUX_AGENT_RELEASE_BASE 指向自建镜像）
-build_download_url() {
-    local ARCH=$(get_architecture)
-    local BASE="${FLUX_AGENT_RELEASE_BASE:-https://github.com/${AGENT_REPO}/releases/download}"
-    echo "${BASE}/${AGENT_RELEASE_TAG}/gost-${ARCH}"
-}
-
-# 构建备用下载地址
-build_fallback_url() {
-    local ARCH=$(get_architecture)
-    echo "https://github.com/${UPSTREAM_REPO}/releases/download/${UPSTREAM_RELEASE_TAG}/gost-${ARCH}"
-}
-
-# 下载地址
-DOWNLOAD_URL=$(build_download_url)
-FALLBACK_URL=$(build_fallback_url)
 INSTALL_DIR="/etc/flux_agent"
-# Go 运行时堆软上限，写入 systemd 单元的 Environment=GOMEMLIMIT。
-# 作用：超过该值后 GC 会更积极回收，避免长时间运行后 RSS 无界增长。
-# 注意：主源二进制已内置同样的缺省值（512MiB），此处显式设置是为
-#       (1) 回退到上游二进制时仍然生效；(2) 让 systemctl show 能直接看到当前值。
-# 缺省值依据（2026-10-31 生产 A/B 实测）：agent 实际 HeapAlloc 约 59MB，
-# 512MiB 有 8 倍余量不会引发频繁 GC；而上限高于历史峰值时 Go scavenger
-# 永不触发，峰值内存长期驻留（实测 300MB 场景：上限高于峰值 → RSS 300MB，
-# 低于峰值 → RSS 123MB）。此前缺省 1200MiB 与生产 drop-in 的 512MiB 不一致，
-# 会导致重跑安装时单元本体被写成 1200MiB，与 drop-in 冲突，故统一为 512MiB。
-# 可用环境变量覆盖：FLUX_AGENT_MEMLIMIT=900MiB ./install.sh
+SERVICE_DIR="/etc/systemd/system"
 MEM_LIMIT="${FLUX_AGENT_MEMLIMIT:-512MiB}"
-COUNTRY=$(curl -s --max-time 10 https://ipinfo.io/country)
-if [ "$COUNTRY" = "CN" ]; then
-    # 国内网络直连 GitHub Releases 常失败，统一走加速前缀（主/备地址都加）
-    DOWNLOAD_URL="https://ghfast.top/${DOWNLOAD_URL}"
-    FALLBACK_URL="https://ghfast.top/${FALLBACK_URL}"
-fi
 
-# 按顺序尝试的下载地址：主源 -> 备源 -> 主源直连（仅国内代理场景下作为兜底）
-DOWNLOAD_CANDIDATES="$DOWNLOAD_URL $FALLBACK_URL"
-if [ "$COUNTRY" = "CN" ]; then
-    DOWNLOAD_CANDIDATES="$DOWNLOAD_CANDIDATES $(build_download_url)"
-fi
+get_architecture() {
+  case $(uname -m) in
+    x86_64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) echo "❌ 当前系统架构没有受支持的节点二进制。" >&2; return 1 ;;
+  esac
+}
 
-# 下载节点二进制到指定路径。
-# 依次尝试各候选地址，任一成功即返回 0；全部失败返回 1。
-# 使用 curl -f，使 404/5xx 直接判为失败，避免把错误页当成二进制保存。
+sha256_of() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum < "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 256 < "$1" | cut -d ' ' -f 1
+  fi
+}
+
 download_agent() {
-    local dest="$1"
-    local url
-    for url in $DOWNLOAD_CANDIDATES; do
-        [ -z "$url" ] && continue
-        echo "⬇️ 尝试下载: $url"
-        if curl -fL --connect-timeout 15 --max-time 300 "$url" -o "$dest" 2>/dev/null; then
-            if [ -s "$dest" ]; then
-                echo "✅ 下载成功"
-                return 0
-            fi
+  local dest="$1" arch primary upstream base expected actual url index
+  arch=$(get_architecture) || return 1
+  case "$arch" in
+    amd64)
+      primary=e7fa5ef2e8ce17dac333d16895e5463d3be784fd9411d1649097040a7a918da7
+      upstream=cf76a81f0952a91f1013a8a8b425380444895e5460407cb6e1d89d54f7f323e4 ;;
+    arm64)
+      primary=1c364276517d26d84fe64355f8133db5f6ab89a634028ed31caf6fa55f658602
+      upstream=a63b3141e5da5c4d2b800a18d3deeab7290b1d5ee6c45c3b1a30d8d0437d3704 ;;
+  esac
+  if [[ -n ${FLUX_AGENT_SHA256:-} ]]; then
+    [[ $FLUX_AGENT_SHA256 =~ ^[0-9a-f]{64}$ ]] || {
+      echo "❌ FLUX_AGENT_SHA256 必须是独立核验的 64 位小写十六进制摘要。" >&2; return 1;
+    }
+    primary=$FLUX_AGENT_SHA256
+  fi
+  base="${FLUX_AGENT_RELEASE_BASE:-https://github.com/${AGENT_REPO}/releases/download}"
+  local -a urls=("${base%/}/${AGENT_RELEASE_TAG}/gost-$arch"
+                 "https://github.com/${UPSTREAM_REPO}/releases/download/${UPSTREAM_RELEASE_TAG}/gost-$arch")
+  for index in 0 1; do
+    expected=$primary
+    if [[ $index == 1 ]]; then
+      expected=$upstream
+      # 自定义发布资产的运营方选择了另一份产物，失败时保留现有版本。
+      [[ -z ${FLUX_AGENT_SHA256:-} ]] || break
+    fi
+    local -a sources=("${urls[index]}")
+    if [[ ${urls[index]} == https://github.com/* ]]; then
+      sources+=("https://ghfast.top/${urls[index]}")
+    fi
+    for url in "${sources[@]}"; do
+      rm -f -- "$dest" || return 1
+      if curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 12 --max-time 300 \
+          -o "$dest" -- "$url" 2>/dev/null && [[ -s "$dest" ]]; then
+        actual=$(sha256_of "$dest") || return 1
+        if [[ $actual == "$expected" ]]; then
+          echo "✅ 节点二进制 SHA-256 校验通过。"
+          return 0
         fi
-        echo "⚠️ 该地址不可用，尝试下一个"
-        rm -f "$dest"
+        echo "⚠️ 节点二进制摘要不匹配，跳过该下载源。" >&2
+      fi
     done
-    return 1
+  done
+  rm -f -- "$dest"
+  echo "❌ 未取得通过摘要校验的节点二进制。" >&2
+  return 1
 }
 
 # 显示菜单
@@ -101,15 +85,6 @@ show_menu() {
   echo "3. 卸载"
   echo "4. 退出"
   echo "==============================================="
-}
-
-# 删除脚本自身
-delete_self() {
-  echo ""
-  echo "🗑️ 操作已完成，正在清理脚本文件..."
-  SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-  sleep 1
-  rm -f "$SCRIPT_PATH" && echo "✅ 脚本文件已删除" || echo "❌ 删除脚本文件失败"
 }
 
 # 检查并安装 tcpkill
@@ -181,109 +156,146 @@ check_and_install_tcpkill() {
 }
 
 
-# 获取用户输入的配置参数
+# 安装参数只写到权限 600 的 JSON 文件。终端交互不回显密钥。
 get_config_params() {
-  if [[ -z "$SERVER_ADDR" || -z "$SECRET" ]]; then
-    echo "请输入配置参数："
-    
-    if [[ -z "$SERVER_ADDR" ]]; then
-      read -p "服务器地址: " SERVER_ADDR
-    fi
-    
-    if [[ -z "$SECRET" ]]; then
-      read -p "密钥: " SECRET
-    fi
-    
-    if [[ -z "$SERVER_ADDR" || -z "$SECRET" ]]; then
-      echo "❌ 参数不完整，操作取消。"
-      exit 1
-    fi
+  if [[ -z ${SERVER_ADDR:-} ]]; then
+    read -r -p "服务器地址: " SERVER_ADDR || return 1
   fi
-
-  # 规范化：去掉 http(s)://、路径和末尾斜杠，只保留 host:port
+  if [[ -z ${SECRET:-} ]]; then
+    read -rs -p "密钥: " SECRET || return 1
+    printf '\n'
+  fi
   SERVER_ADDR="${SERVER_ADDR#http://}"
   SERVER_ADDR="${SERVER_ADDR#https://}"
   SERVER_ADDR="${SERVER_ADDR%%/*}"
-  SERVER_ADDR="${SERVER_ADDR%/}"
-
-  # 校验格式：IPv4/域名:端口 或 [IPv6]:端口
-  if ! [[ "$SERVER_ADDR" =~ ^(\[[^]]+\]|[^:[:space:]]+):[0-9]+$ ]]; then
-    echo "❌ 面板后端地址格式错误: $SERVER_ADDR"
-    echo "   正确格式是 IP:端口，例如 1.2.3.4:6365"
-    echo "   不要带 http://、https://、路径或末尾斜杠；端口是后端端口，不是面板网页端口"
-    exit 1
+  if ! [[ $SERVER_ADDR =~ ^(\[[0-9a-fA-F:%.]+\]|[a-zA-Z0-9_.-]+):([0-9]{1,5})$ ]] ||
+     (( 10#${BASH_REMATCH[2]} < 1 || 10#${BASH_REMATCH[2]} > 65535 )); then
+    echo "❌ 请使用 IP 或域名:后端端口，IPv6 地址须带方括号。" >&2
+    return 1
+  fi
+  if [[ -z $SECRET || $SECRET =~ [[:cntrl:]] ]]; then
+    echo "❌ 节点密钥缺失或包含控制字符。" >&2
+    return 1
   fi
 }
 
-# 解析命令行参数
-while getopts "a:s:" opt; do
-  case $opt in
-    a) SERVER_ADDR="$OPTARG" ;;
-    s) SECRET="$OPTARG" ;;
-    *) echo "❌ 无效参数"; exit 1 ;;
-  esac
-done
-
-# 安装功能
-install_flux_agent() {
-  echo "🚀 开始安装 flux_agent..."
-  get_config_params
-
-    # 检查并安装 tcpkill
-  check_and_install_tcpkill
-  
-
-  mkdir -p "$INSTALL_DIR"
-
-  # 停止并禁用已有服务
-  if systemctl list-units --full -all | grep -Fq "flux_agent.service"; then
-    echo "🔍 检测到已存在的flux_agent服务"
-    systemctl stop flux_agent 2>/dev/null && echo "🛑 停止服务"
-    systemctl disable flux_agent 2>/dev/null && echo "🚫 禁用自启"
-  fi
-
-  # 删除旧文件
-  [[ -f "$INSTALL_DIR/flux_agent" ]] && echo "🧹 删除旧文件 flux_agent" && rm -f "$INSTALL_DIR/flux_agent"
-
-  # 下载 flux_agent
-  echo "⬇️ 下载 flux_agent 中..."
-  if ! download_agent "$INSTALL_DIR/flux_agent"; then
-    echo "❌ 下载失败，请检查网络或下载链接。"
-    exit 1
-  fi
-  chmod +x "$INSTALL_DIR/flux_agent"
-  echo "✅ 下载完成"
-
-  # 打印版本
-  echo "🔎 flux_agent 版本：$($INSTALL_DIR/flux_agent -V)"
-
-  # 写入 config.json (安装时总是创建新的)
-  CONFIG_FILE="$INSTALL_DIR/config.json"
-  echo "📄 创建新配置: config.json"
-  cat > "$CONFIG_FILE" <<EOF
-{
-  "addr": "$SERVER_ADDR",
-  "secret": "$SECRET"
+json_string() {
+  local escaped="$1"
+  escaped=${escaped//\\/\\\\}
+  escaped=${escaped//\"/\\\"}
+  printf '"%s"' "$escaped"
 }
-EOF
 
-  # 写入 gost.json
-  GOST_CONFIG="$INSTALL_DIR/gost.json"
-  if [[ -f "$GOST_CONFIG" ]]; then
-    echo "⏭️ 跳过配置文件: gost.json (已存在)"
+# 观察 PID 持续存活，避免把 systemd 的短暂 active 当作启动成功。
+wait_for_agent() {
+  local attempt pid last_pid= stable=0
+  for ((attempt=0; attempt<20; attempt++)); do
+    if systemctl is-active --quiet flux_agent &&
+       pid=$(systemctl show -p MainPID --value flux_agent) && [[ $pid =~ ^[1-9][0-9]*$ ]]; then
+      if [[ $pid == "$last_pid" ]]; then
+        stable=$((stable + 1))
+        [[ $stable == 2 ]] && return 0
+      else
+        last_pid=$pid
+        stable=0
+      fi
+    else
+      last_pid=
+      stable=0
+    fi
+    sleep 1
+  done
+  echo "❌ 节点进程未通过启动检查，请查看本机 flux_agent 日志。" >&2
+  return 1
+}
+
+# 备份和临时文件位于同一文件系统，单个文件以 rename 原子替换。
+agent_restore_file() {
+  local backup="$1" destination="$2"
+  if [[ -e $backup || -L $backup ]]; then
+    mv -f -- "$backup" "$destination"
   else
-    echo "📄 创建新配置: gost.json"
-    cat > "$GOST_CONFIG" <<EOF
-{}
-EOF
+    rm -f -- "$destination"
   fi
+}
 
-  # 加强权限
-  chmod 600 "$INSTALL_DIR"/*.json
-
-  # 创建 systemd 服务
-  SERVICE_FILE="/etc/systemd/system/flux_agent.service"
-  cat > "$SERVICE_FILE" <<EOF
+# 子 shell 的 EXIT trap 同时覆盖命令失败和 INT/TERM。回滚失败保留现场。
+agent_transaction() (
+  umask 077
+  local mode="$1" work='' unit_work='' changed=0 stopped=0 old_active=0 enabled_here=0
+  local write_config=0 write_gost=0 write_unit=0 write_limit=0 rc=0 keep=0
+  local svc="$SERVICE_DIR/flux_agent.service" dropdir="$SERVICE_DIR/flux_agent.service.d"
+  local limit_file="$dropdir/99-flux-agent-memory.conf"
+  command -v flock >/dev/null || { echo "节点安装需要 flock（util-linux）。" >&2; exit 1; }
+  if [[ $mode == update && ! -f $INSTALL_DIR/flux_agent ]]; then
+    echo "❌ flux_agent 未安装，请先选择安装。" >&2
+    exit 1
+  fi
+  mkdir -p -- "$INSTALL_DIR" || exit 1
+  exec 9>"$INSTALL_DIR/.install.lock" || exit 1
+  flock -n 9 || { echo "❌ 同一节点有另一个安装操作正在运行。" >&2; exit 1; }
+  agent_finish() {
+    rc=$?
+    trap - EXIT
+    trap '' INT TERM
+    if [[ $rc != 0 && $changed == 1 ]]; then
+      echo "⚠️ 节点操作失败，正在恢复旧版本。" >&2
+      if systemctl stop flux_agent; then
+        if (( enabled_here )); then systemctl disable flux_agent || keep=1; fi
+        agent_restore_file "$work/old-agent" "$INSTALL_DIR/flux_agent" || keep=1
+        if ((write_config)); then agent_restore_file "$work/old-config" "$INSTALL_DIR/config.json" || keep=1; fi
+        if ((write_gost)); then rm -f -- "$INSTALL_DIR/gost.json" || keep=1; fi
+        if ((write_unit)); then agent_restore_file "$unit_work/old-unit" "$svc" || keep=1; fi
+        if ((write_limit)); then agent_restore_file "$unit_work/old-limit" "$limit_file" || keep=1; fi
+        systemctl daemon-reload || keep=1
+      else
+        keep=1
+      fi
+    fi
+    if [[ $rc != 0 && $old_active == 1 ]] && (( changed || stopped )); then
+      if ((keep == 0)); then
+        { systemctl start flux_agent && wait_for_agent; } || keep=1
+      fi
+    fi
+    if ((keep)); then
+      echo "❌ 节点自动回滚未完成，备份位于 $work 和 $unit_work。请先恢复旧服务。" >&2
+    else
+      if [[ -n $work ]]; then rm -rf -- "$work"; fi
+      if [[ -n $unit_work ]]; then rm -rf -- "$unit_work"; fi
+    fi
+    exit "$rc"
+  }
+  trap agent_finish EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  work=$(mktemp -d "$INSTALL_DIR/.upgrade.XXXXXX") || exit 1
+  unit_work=$(mktemp -d "$SERVICE_DIR/.flux-agent.XXXXXX") || exit 1
+  if [[ ! $MEM_LIMIT =~ ^(off|[0-9]+(B|KiB|MiB|GiB|TiB)?)$ ]]; then
+    echo "❌ GOMEMLIMIT 格式无效。" >&2; exit 1
+  fi
+  download_agent "$work/agent" || exit 1
+  chmod 0755 "$work/agent" || exit 1
+  if [[ -e $INSTALL_DIR/flux_agent || -L $INSTALL_DIR/flux_agent ]]; then
+    cp -pP -- "$INSTALL_DIR/flux_agent" "$work/old-agent" || exit 1
+  fi
+  if [[ $mode == install ]]; then
+    write_config=1
+    if [[ -e $INSTALL_DIR/config.json || -L $INSTALL_DIR/config.json ]]; then
+      cp -pP -- "$INSTALL_DIR/config.json" "$work/old-config" || exit 1
+    fi
+    printf '{\n  "addr": %s,\n  "secret": %s\n}\n' \
+      "$(json_string "$SERVER_ADDR")" "$(json_string "$SECRET")" > "$work/config.json" || exit 1
+    if [[ ! -e $INSTALL_DIR/gost.json && ! -L $INSTALL_DIR/gost.json ]]; then
+      write_gost=1
+      printf '{}\n' > "$work/gost.json" || exit 1
+    fi
+  fi
+  if [[ ! -f $svc ]]; then
+    if [[ $mode == update || -L $svc ]]; then
+      echo "❌ 既有节点缺少预期的 systemd 单元。" >&2; exit 1
+    fi
+    write_unit=1
+    cat > "$unit_work/unit" <<EOF || exit 1
 [Unit]
 Description=Flux_agent Proxy Service
 After=network.target
@@ -291,126 +303,58 @@ After=network.target
 [Service]
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/flux_agent
-# 堆软上限：防止长时间运行后内存无界增长（Go 运行时原生支持，无需改二进制）
 Environment="GOMEMLIMIT=$MEM_LIMIT"
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    chmod 0644 "$unit_work/unit" || exit 1
+  elif [[ -n ${FLUX_AGENT_MEMLIMIT:-} ]] ||
+       { ! grep -q 'GOMEMLIMIT=' "$svc" && ! grep -rqs 'GOMEMLIMIT=' "$dropdir"; }; then
+    write_limit=1
+    if [[ -e $limit_file || -L $limit_file ]]; then
+      cp -pP -- "$limit_file" "$unit_work/old-limit" || exit 1
+    fi
+    printf '[Service]\nEnvironment="GOMEMLIMIT=%s"\n' "$MEM_LIMIT" > "$unit_work/limit" || exit 1
+    chmod 0644 "$unit_work/limit" || exit 1
+  fi
 
-  # 启动服务
-  systemctl daemon-reload
-  systemctl enable flux_agent
-  systemctl start flux_agent
+  if systemctl is-active --quiet flux_agent; then old_active=1; fi
+  if [[ -f $svc ]] || ((old_active)); then
+    stopped=1
+    systemctl stop flux_agent || exit 1
+  fi
+  changed=1
+  mv -f -- "$work/agent" "$INSTALL_DIR/flux_agent" || exit 1
+  if ((write_config)); then mv -f -- "$work/config.json" "$INSTALL_DIR/config.json" || exit 1; fi
+  if ((write_gost)); then mv -f -- "$work/gost.json" "$INSTALL_DIR/gost.json" || exit 1; fi
+  if ((write_unit)); then mv -f -- "$unit_work/unit" "$svc" || exit 1; fi
+  if ((write_limit)); then
+    mkdir -p -- "$dropdir" && mv -f -- "$unit_work/limit" "$limit_file" || exit 1
+  fi
+  systemctl daemon-reload || exit 1
+  if [[ $mode == install ]] && ! systemctl is-enabled --quiet flux_agent; then
+    enabled_here=1
+    systemctl enable flux_agent || exit 1
+  fi
+  systemctl start flux_agent && wait_for_agent || exit 1
+)
 
-  # 检查状态
-  echo "🔄 检查服务状态..."
-  if systemctl is-active --quiet flux_agent; then
-    echo "✅ 安装完成，flux_agent服务已启动并设置为开机启动。"
-    echo "📁 配置目录: $INSTALL_DIR"
-    echo "🔧 服务状态: $(systemctl is-active flux_agent)"
+install_flux_agent() {
+  get_config_params && agent_transaction install || return 1
+  check_and_install_tcpkill
+  echo "✅ 节点安装完成，服务已启动。配置目录: $INSTALL_DIR"
+  if curl -fsS -m 6 -o /dev/null -- "http://$SERVER_ADDR/flow/test" 2>/dev/null; then
+    echo "✅ 面板后端可达。"
   else
-    echo "❌ flux_agent服务启动失败，请执行以下命令查看日志："
-    echo "journalctl -u flux_agent -f"
-    return 1
+    echo "⚠️ 节点已启动，面板连通性检查失败。请检查后端绑定地址及安全组。"
   fi
-
-  # 连通性自检：节点必须能访问面板后端的 /flow/test
-  echo "🔍 测试面板连通性: http://$SERVER_ADDR/flow/test"
-  HTTP_CODE=$(curl -s -m 6 -o /dev/null -w "%{http_code}" "http://$SERVER_ADDR/flow/test" || true)
-  if [ "$HTTP_CODE" = "200" ]; then
-    echo "✅ 面板可达，节点会在几秒内上线（面板「节点监控」里刷新查看）"
-  else
-    echo "⚠️ 无法连接面板后端：http://$SERVER_ADDR/flow/test （返回: ${HTTP_CODE:-超时}）"
-    echo "   请依次检查："
-    echo "   1) 面板服务器安全组/防火墙是否放行该端口（默认 6365/TCP，节点→面板方向）"
-    echo "   2) 地址是否为 IP:端口（不能带 http://，不要填面板网页端口 6366）"
-    echo "   3) 面板容器是否运行：docker compose ps（springboot-backend 应为 healthy）"
-    echo "   4) 是否套了 CDN/反向代理（节点连接不支持）"
-    echo "   查看节点日志：journalctl -u flux_agent -n 50 --no-pager"
-  fi
-}
-
-# 更新功能
-# 确保 systemd 单元中存在 GOMEMLIMIT（供老节点升级时补上，幂等）
-ensure_service_memory_limit() {
-  local svc="/etc/systemd/system/flux_agent.service"
-  [[ -f "$svc" ]] || return 0
-  # drop-in 优先级高于单元本体。若节点上已有 drop-in 设置了 GOMEMLIMIT
-  # （历史上手工加过内存上限的机器），只更新 drop-in，不再往本体写一份，
-  # 避免两处数值不一致导致 systemctl show 与实际行为对不上。
-  local dropin_dir="/etc/systemd/system/flux_agent.service.d"
-  if [[ -d "$dropin_dir" ]] && grep -rqs 'GOMEMLIMIT=' "$dropin_dir"; then
-    local f
-    for f in "$dropin_dir"/*.conf; do
-      [[ -f "$f" ]] || continue
-      if grep -q 'GOMEMLIMIT=' "$f"; then
-        sed -i -E "s|^(Environment=\"?GOMEMLIMIT=)[^\"]*(\"?)$|\1${MEM_LIMIT}\2|" "$f"
-      fi
-    done
-    systemctl daemon-reload
-    return 0
-  fi
-  if grep -q '^Environment="GOMEMLIMIT=' "$svc"; then
-    # 已存在：按当前 MEM_LIMIT 刷新数值
-    sed -i "s|^Environment=\"GOMEMLIMIT=.*\"$|Environment=\"GOMEMLIMIT=$MEM_LIMIT\"|" "$svc"
-  else
-    # 不存在：插到 ExecStart 之后（用 awk 避免 sed a\ 的转义问题）
-    awk -v lim="$MEM_LIMIT" '
-      /^ExecStart=/ {
-        print
-        print "# 堆软上限：防止长时间运行后内存无界增长（Go 运行时原生支持，无需改二进制）"
-        print "Environment=\"GOMEMLIMIT=" lim "\""
-        next
-      }
-      { print }
-    ' "$svc" > "$svc.tmp" && mv "$svc.tmp" "$svc"
-  fi
-  systemctl daemon-reload
 }
 
 update_flux_agent() {
-  echo "🔄 开始更新 flux_agent..."
-  
-  if [[ ! -d "$INSTALL_DIR" ]]; then
-    echo "❌ flux_agent 未安装，请先选择安装。"
-    return 1
-  fi
-  
-  echo "📥 使用下载地址: $DOWNLOAD_URL"
-  
-  # 检查并安装 tcpkill
-  check_and_install_tcpkill
-  
-  # 先下载新版本
-  echo "⬇️ 下载最新版本..."
-  if ! download_agent "$INSTALL_DIR/flux_agent.new"; then
-    echo "❌ 下载失败。"
-    return 1
-  fi
-
-  # 停止服务
-  if systemctl list-units --full -all | grep -Fq "flux_agent.service"; then
-    echo "🛑 停止 flux_agent 服务..."
-    systemctl stop flux_agent
-  fi
-
-  # 替换文件
-  mv "$INSTALL_DIR/flux_agent.new" "$INSTALL_DIR/flux_agent"
-  chmod +x "$INSTALL_DIR/flux_agent"
-  
-  # 打印版本
-  echo "🔎 新版本：$($INSTALL_DIR/flux_agent -V)"
-
-  # 补齐内存上限（老节点升级时同样生效）
-  ensure_service_memory_limit
-
-  # 重启服务
-  echo "🔄 重启服务..."
-  systemctl start flux_agent
-  
-  echo "✅ 更新完成，服务已重新启动。"
+  agent_transaction update || return 1
+  echo "✅ 节点更新完成，服务已通过启动检查。"
 }
 
 # 卸载功能
@@ -431,8 +375,8 @@ uninstall_flux_agent() {
   fi
 
   # 删除服务文件
-  if [[ -f "/etc/systemd/system/flux_agent.service" ]]; then
-    rm -f "/etc/systemd/system/flux_agent.service"
+  if [[ -f "${SERVICE_DIR}/flux_agent.service" ]]; then
+    rm -f "${SERVICE_DIR}/flux_agent.service"
     echo "🧹 删除服务文件"
   fi
 
@@ -448,48 +392,32 @@ uninstall_flux_agent() {
   echo "✅ 卸载完成"
 }
 
-# 主逻辑
 main() {
-  # 如果提供了命令行参数，直接执行安装
-  if [[ -n "$SERVER_ADDR" && -n "$SECRET" ]]; then
+  local opt choice
+  while getopts "a:s:" opt; do
+    case $opt in
+      a) SERVER_ADDR="$OPTARG" ;;
+      s) SECRET="$OPTARG" ;;
+      *) return 1 ;;
+    esac
+  done
+  if [[ -n ${SERVER_ADDR:-} && -n ${SECRET:-} ]]; then
     install_flux_agent
-    delete_self
-    exit 0
+    return
   fi
-
-  # 显示交互式菜单
   while true; do
     show_menu
-    read -p "请输入选项 (1-4): " choice
-    
+    read -r -p "请输入选项 (1-4): " choice || return 1
     case $choice in
-      1)
-        install_flux_agent
-        delete_self
-        exit 0
-        ;;
-      2)
-        update_flux_agent
-        delete_self
-        exit 0
-        ;;
-      3)
-        uninstall_flux_agent
-        delete_self
-        exit 0
-        ;;
-      4)
-        echo "👋 退出脚本"
-        delete_self
-        exit 0
-        ;;
-      *)
-        echo "❌ 无效选项，请输入 1-4"
-        echo ""
-        ;;
+      1) install_flux_agent; return $? ;;
+      2) update_flux_agent; return $? ;;
+      3) uninstall_flux_agent; return $? ;;
+      4) return 0 ;;
+      *) echo "❌ 无效选项，请输入 1-4" ;;
     esac
   done
 }
 
-# 执行主函数
-main
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

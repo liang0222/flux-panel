@@ -3,8 +3,8 @@ package com.admin.common.utils;
 import cn.hutool.core.util.StrUtil;
 import com.admin.common.dto.GostDto;
 import com.admin.entity.*;
-import com.alibaba.fastjson.JSONArray;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 

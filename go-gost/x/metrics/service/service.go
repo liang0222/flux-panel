@@ -1,8 +1,11 @@
 package service
 
 import (
+	"fmt"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/go-gost/core/auth"
 	"github.com/go-gost/core/service"
@@ -33,9 +36,10 @@ func AutherOption(auther auth.Authenticator) Option {
 }
 
 type metricService struct {
-	s      *http.Server
-	ln     net.Listener
-	cclose chan struct{}
+	s         *http.Server
+	ln        net.Listener
+	cclose    chan struct{}
+	closeOnce sync.Once
 }
 
 func NewService(network, addr string, opts ...Option) (service.Service, error) {
@@ -55,6 +59,10 @@ func NewService(network, addr string, opts ...Option) (service.Service, error) {
 		options.path = DefaultPath
 	}
 
+	if !strings.HasPrefix(options.path, "/") || strings.ContainsAny(options.path, "{} \t\r\n") {
+		ln.Close()
+		return nil, fmt.Errorf("invalid metrics path")
+	}
 	mux := http.NewServeMux()
 	mux.Handle(options.path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if options.auther != nil {
@@ -84,7 +92,13 @@ func (s *metricService) Addr() net.Addr {
 }
 
 func (s *metricService) Close() error {
-	return s.s.Close()
+	var err error
+	s.closeOnce.Do(func() {
+		close(s.cclose)
+		err = s.s.Close()
+		s.ln.Close() // Serve might not have started yet.
+	})
+	return err
 }
 
 func (s *metricService) IsClosed() bool {

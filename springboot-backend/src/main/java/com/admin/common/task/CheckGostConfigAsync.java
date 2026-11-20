@@ -4,7 +4,7 @@ import com.admin.common.dto.*;
 import com.admin.common.utils.GostUtil;
 import com.admin.entity.*;
 import com.admin.service.*;
-import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson2.JSONArray;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;

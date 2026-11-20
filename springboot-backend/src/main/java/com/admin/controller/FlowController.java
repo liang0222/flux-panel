@@ -1,7 +1,6 @@
 package com.admin.controller;
 
 import com.admin.common.aop.LogAnnotation;
-import com.admin.common.dto.FlowDto;
 import com.admin.common.dto.GostConfigDto;
 import com.admin.common.task.CheckGostConfigAsync;
 import com.admin.common.utils.AESCrypto;
@@ -9,26 +8,39 @@ import com.admin.common.utils.GostUtil;
 import com.admin.common.utils.RealtimeFlowTracker;
 import com.admin.entity.*;
 import com.admin.service.ChainTunnelService;
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONArray;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.dao.DataAccessException;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.TransactionException;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.bind.annotation.*;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.Resource;
 import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
+import java.nio.ByteBuffer;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.Collections;
+import java.util.regex.Pattern;
 
 /**
  * 流量上报控制器
@@ -45,37 +57,21 @@ import java.util.Collections;
  * 8. 检查转发状态，状态不为1时暂停对应转发
  * 9. 检查用户隧道权限状态，状态不为1时暂停对应转发
  * <p>
- * 并发安全解决方案：
- * 1. 使用UpdateWrapper进行数据库层面的原子更新操作，避免读取-修改-写入的竞态条件
- * 2. 使用synchronized锁确保同一用户/隧道的流量更新串行执行
- * 3. 这样可以避免相同用户相同隧道不同转发同时上报时流量统计丢失的问题
+ * 批次去重凭据与各维度的原子计数更新在 SQLite 同一事务提交。
  */
 @RestController
 @RequestMapping("/flow")
-@CrossOrigin
 @Slf4j
 public class FlowController extends BaseController {
 
     // 常量定义
     private static final String SUCCESS_RESPONSE = "ok";
     private static final String DEFAULT_USER_TUNNEL_ID = "0";
-    private static final long BYTES_TO_GB = 1024L * 1024L * 1024L;
-
-    // 用于同步相同用户和隧道的流量更新操作
-    // 优化：原来按 ID 往 ConcurrentHashMap 里塞锁对象，转发/用户被删除重建后这些 key 永远不会被移除，
-    // 内存随历史 ID 数量单调增长；改成固定条带锁，内存恒定，相同 ID 仍然落在同一把锁上。
-    private static final int LOCK_STRIPES = 64;
-    private static final Object[] USER_LOCKS = new Object[LOCK_STRIPES];
-    private static final Object[] TUNNEL_LOCKS = new Object[LOCK_STRIPES];
-    private static final Object[] FORWARD_LOCKS = new Object[LOCK_STRIPES];
-
-    static {
-        for (int i = 0; i < LOCK_STRIPES; i++) {
-            USER_LOCKS[i] = new Object();
-            TUNNEL_LOCKS[i] = new Object();
-            FORWARD_LOCKS[i] = new Object();
-        }
-    }
+    private static final BigInteger BYTES_TO_GB = BigInteger.ONE.shiftLeft(30);
+    static final String BATCH_ID_HEADER = "X-Flow-Batch-Id";
+    private static final Pattern BATCH_ID_PATTERN = Pattern.compile(
+            "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}");
+    private static final Pattern SERVICE_ID_PATTERN = Pattern.compile("0|[1-9][0-9]*");
 
     // 缓存加密器实例，避免重复创建。
     // 优化：原实现用 ConcurrentHashMap 且无任何淘汰逻辑，key 是节点 secret，
@@ -99,6 +95,12 @@ public class FlowController extends BaseController {
 
     @Resource
     RealtimeFlowTracker realtimeFlowTracker;
+
+    @Resource
+    JdbcTemplate jdbcTemplate;
+
+    @Resource
+    TransactionTemplate flowTransaction;
 
     /**
      * 加密消息包装器
@@ -151,7 +153,7 @@ public class FlowController extends BaseController {
             log.info("🔓 节点 {} 配置数据接收成功{}", node.getId(), isEncryptedMessage(rawData) ? "（已解密）" : "");
 
         } catch (Exception e) {
-            log.error("处理节点 {} 配置数据失败: {}", node.getId(), e.getMessage());
+            log.error("处理节点 {} 配置数据失败: {}", node.getId(), e.getClass().getName());
         }
 
         return SUCCESS_RESPONSE;
@@ -172,36 +174,113 @@ public class FlowController extends BaseController {
      */
     @RequestMapping("/upload")
     @LogAnnotation
-    public String uploadFlowData(@RequestBody String rawData, String secret) {
-        // 1. 验证节点权限
-        if (!isValidNode(secret)) {
-            return SUCCESS_RESPONSE;
+    public ResponseEntity<String> uploadFlowData(@RequestBody String rawData, String secret,
+                                                  @RequestHeader(value = BATCH_ID_HEADER, required = false) String batchId) {
+        final BatchContext batch;
+        try {
+            // 无批次 ID 的旧节点沿用原鉴权与 ACK。新协议由验证后的节点主键确定去重范围。
+            Node node = batchId == null ? null : nodeService.getOne(new QueryWrapper<Node>()
+                    .select("id").eq("secret", secret));
+            if (batchId == null && !isValidNode(secret)) {
+                return ResponseEntity.ok(SUCCESS_RESPONSE);
+            }
+            if (batchId != null && node == null) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("invalid flow node");
+            }
+            if (batchId != null && !BATCH_ID_PATTERN.matcher(batchId).matches()) {
+                return ResponseEntity.badRequest().body("invalid flow batch ID");
+            }
+
+            List<FlowEvent> rows = parseFlowRows(rawData, secret);
+            if (node == null && rows.isEmpty()) {
+                return ResponseEntity.ok(SUCCESS_RESPONSE);
+            }
+            String payloadHash = node == null ? null : fingerprint(rows);
+            batch = flowTransaction.execute(status -> {
+                // SQLite 先取得写入资格再读计费配置，避免将已过期的读快照升级为写事务。
+                if (node == null) {
+                    jdbcTemplate.update("UPDATE flow_report_batch SET received_at = received_at WHERE 0");
+                } else if (!registerBatch(node.getId(), batchId, payloadHash)) {
+                    return null;
+                }
+
+                BatchContext context = new BatchContext();
+                for (FlowEvent row : rows) {
+                    collectFlowData(row, context);
+                }
+                flushFlows(context);
+                checkLimits(context);
+                return context;
+            });
+        } catch (BatchIdConflict e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("flow batch ID already used");
+        } catch (IllegalArgumentException | com.alibaba.fastjson2.JSONException e) {
+            return ResponseEntity.badRequest().body("invalid flow data");
+        } catch (FlowCounterOverflow e) {
+            // 整批回滚，包括批次登记；避免无声丢账或在 SQLite 中把 INTEGER 提升成 REAL。
+            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body("flow counter capacity exceeded");
+        } catch (DataAccessException | TransactionException | FlowBillingUnavailable e) {
+            log.warn("流量账本事务失败，异常类型: {}", e.getClass().getSimpleName());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("flow accounting unavailable");
         }
 
-        // 2. 尝试解密数据
-        String decryptedData = decryptIfNeeded(rawData, secret);
-
-        // 3. 解析为FlowDto列表
-        JSONArray flowDataList = JSONObject.parseArray(decryptedData);
-        // 优化：原来是每次上报都 log.info 整个数组，节点每 5 秒上报一次，等于持续把 JSON 序列化后写盘；
-        // 改为按日志级别惰性输出，INFO 下不再产生字符串与 IO 开销。
-        if (log.isDebugEnabled()) {
-            log.debug("节点上报流量数据{}", flowDataList);
-        }
-
-        // 4. 同一批次内复用转发/隧道查询结果，并把增量按实体聚合后再写库
-        BatchContext batch = new BatchContext();
-        for (int i = 0; i < flowDataList.size(); i++) {
-            String jsonObject = flowDataList.getJSONObject(i).toJSONString();
-            FlowDto flowDto = JSONObject.parseObject(jsonObject, FlowDto.class);
-            if (!Objects.equals(flowDto.getN(), "web_api")) {
-                collectFlowData(flowDto, batch);
+        if (batch != null) {
+            // 计数提交后才记录速率和发送暂停；重复批次不再次执行这些外部副作用。
+            for (FlowEvent event : batch.events) {
+                try {
+                    recordRealtimeRate(event, batch.forwards.get(event.forwardId));
+                } catch (RuntimeException e) {
+                    log.warn("账本已提交，记录实时速率失败，异常类型: {}", e.getClass().getSimpleName());
+                }
+            }
+            for (Runnable pause : batch.pauses) {
+                try {
+                    pause.run();
+                } catch (RuntimeException e) {
+                    log.warn("账本已提交，暂停流量服务失败，异常类型: {}", e.getClass().getSimpleName());
+                }
             }
         }
-        flushFlows(batch);
-        checkLimits(batch);
-        return SUCCESS_RESPONSE;
+        return ResponseEntity.ok(SUCCESS_RESPONSE);
+    }
 
+    // 保留直接调用的旧签名。
+    public String uploadFlowData(String rawData, String secret) {
+        return uploadFlowData(rawData, secret, null).getBody();
+    }
+
+    private boolean registerBatch(Long nodeId, String batchId, String payloadHash) {
+        int inserted = jdbcTemplate.update("""
+                INSERT INTO flow_report_batch (node_id, batch_id, payload_sha256, received_at)
+                VALUES (?, ?, ?, ?) ON CONFLICT (node_id, batch_id) DO NOTHING
+                """, nodeId, batchId, payloadHash, System.currentTimeMillis());
+        if (inserted == 1) {
+            return true;
+        }
+        String storedHash = jdbcTemplate.queryForObject("""
+                SELECT payload_sha256 FROM flow_report_batch WHERE node_id = ? AND batch_id = ?
+                """, String.class, nodeId, batchId);
+        if (!payloadHash.equals(storedHash)) {
+            throw new BatchIdConflict();
+        }
+        return false;
+    }
+
+    private static String fingerprint(List<FlowEvent> rows) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            ByteBuffer record = ByteBuffer.allocate(Long.BYTES * 3 + Integer.BYTES * 2);
+            for (FlowEvent row : rows) {
+                // 固定宽度，按消息顺序编码原始账本字段，不依赖 JSON 排版、加密封装或当前计费配置。
+                record.clear();
+                record.putLong(Long.parseLong(row.forwardId)).putInt(Integer.parseInt(row.userId))
+                        .putInt(Integer.parseInt(row.userTunnelId)).putLong(row.inDelta).putLong(row.outDelta);
+                digest.update(record.array());
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
     }
 
     /**
@@ -242,7 +321,7 @@ public class FlowController extends BaseController {
             }
         } catch (Exception e) {
             // 解析失败，可能是非加密格式，直接返回原始数据
-            log.info("数据未加密或解密失败，使用原始数据: {}", e.getMessage());
+            log.debug("流量数据未匹配加密格式或解密失败: {}", e.getClass().getName());
         }
 
         return rawData;
@@ -255,49 +334,73 @@ public class FlowController extends BaseController {
         return CRYPTO_CACHE.computeIfAbsent(secret, AESCrypto::create);
     }
 
-    /**
-     * 单条流量上报的采集逻辑：只做查询（同批次内缓存）、倍率换算、实时速率记录与增量累加，
-     * 不直接写库。真正落库在 {@link #flushFlows(BatchContext)} 里按实体聚合后一次性完成。
-     */
-    private void collectFlowData(FlowDto flowData, BatchContext batch) {
-        String[] serviceIds = parseServiceName(flowData.getN());
-        String forwardId = serviceIds[0];
-        String userId = serviceIds[1];
-        String userTunnelId = serviceIds[2];
-
-        Forward forward = resolveForward(batch, forwardId);
-        if (forward != null) {
-            Tunnel tunnel = resolveTunnel(batch, forward.getTunnelId());
-
-            // 流量倍率换算
-            // 优化：倍率为 1 时 BigDecimal 乘 1 不改变数值，跳过 BigDecimal 的创建与运算（结果完全一致）
-            BigDecimal trafficRatio = tunnel.getTrafficRatio();
-            long rawD = flowData.getD() == null ? 0L : flowData.getD();
-            long rawU = flowData.getU() == null ? 0L : flowData.getU();
-            long newD = rawD;
-            long newU = rawU;
-            if (trafficRatio.compareTo(BigDecimal.ONE) != 0) {
-                newD = BigDecimal.valueOf(rawD).multiply(trafficRatio).longValue();
-                newU = BigDecimal.valueOf(rawU).multiply(trafficRatio).longValue();
+    private List<FlowEvent> parseFlowRows(String rawData, String secret) {
+        JSONArray items = JSON.parseArray(decryptIfNeeded(rawData, secret));
+        if (items == null) {
+            throw new IllegalArgumentException("expected flow array");
+        }
+        List<FlowEvent> rows = new ArrayList<>();
+        for (Object item : items) {
+            if (!(item instanceof JSONObject row) || !(row.get("n") instanceof String serviceName)) {
+                throw new IllegalArgumentException("expected named flow row");
             }
+            String[] ids = parseServiceName(serviceName);
+            if (ids == null) {
+                // 节点也会上报 web_api 等非转发服务，它们没有计费实体。
+                continue;
+            }
+            rows.add(new FlowEvent(ids[0], ids[1], ids[2], serviceName,
+                    parseByteCount(row.get("d")), parseByteCount(row.get("u"))));
+        }
+        return rows;
+    }
 
-            // 流量方向处理（1=单向 2=双向）
-            flowData.setD(newD * tunnel.getFlow());
-            flowData.setU(newU * tunnel.getFlow());
+    /** 同批次内复用查询，按既有计费顺序换算后聚合各维度增量。 */
+    private void collectFlowData(FlowEvent row, BatchContext batch) {
+        long in = row.inDelta;
+        long out = row.outDelta;
+        Forward forward = resolveForward(batch, row.forwardId);
+        if (forward != null) {
+            Tunnel tunnel = forward.getTunnelId() == null ? null : resolveTunnel(batch, forward.getTunnelId());
+            if (tunnel == null || tunnel.getTrafficRatio() == null || tunnel.getTrafficRatio().signum() < 0
+                    || !(Objects.equals(tunnel.getFlow(), 1) || Objects.equals(tunnel.getFlow(), 2))) {
+                // 转发存在但计费配置不完整时，不猜测倍率。已删除的转发仍按原值记用户账。
+                throw new FlowBillingUnavailable();
+            }
+            try {
+                in = billedBytes(in, tunnel.getTrafficRatio(), tunnel.getFlow());
+                out = billedBytes(out, tunnel.getTrafficRatio(), tunnel.getFlow());
+            } catch (ArithmeticException e) {
+                throw new FlowCounterOverflow();
+            }
         }
 
-        // 记录实时速率（内存滑动窗口，不落库）
-        recordRealtimeRate(forwardId, userId, forward, flowData);
+        accumulate(batch, row.forwardId, row.userId, row.userTunnelId, in, out);
+        batch.events.add(new FlowEvent(row.forwardId, row.userId, row.userTunnelId, row.name, in, out));
+    }
 
-        // 按实体累加增量，同一批次内同一个转发/用户/用户隧道只产生一条 UPDATE
-        accumulate(batch.forwardDeltas, forwardId, flowData.getD(), flowData.getU());
-        accumulate(batch.userDeltas, userId, flowData.getD(), flowData.getU());
-        if (!Objects.equals(userTunnelId, DEFAULT_USER_TUNNEL_ID)) {
-            accumulate(batch.tunnelDeltas, userTunnelId, flowData.getD(), flowData.getU());
+    private static long parseByteCount(Object value) {
+        if (value == null) {
+            return 0L;
         }
+        long count;
+        if (value instanceof Integer || value instanceof Long) {
+            count = ((Number) value).longValue();
+        } else if (value instanceof BigInteger integer && integer.signum() >= 0 && integer.bitLength() <= 63) {
+            count = integer.longValue();
+        } else {
+            throw new IllegalArgumentException("expected signed-64-bit integer byte count");
+        }
+        if (count < 0) {
+            throw new IllegalArgumentException("expected nonnegative byte count");
+        }
+        return count;
+    }
 
-        batch.events.add(new FlowEvent(forwardId, userId, userTunnelId,
-                buildServiceName(forwardId, userId, userTunnelId), flowData.getD(), flowData.getU()));
+    private static long billedBytes(long bytes, BigDecimal ratio, int direction) {
+        long scaled = ratio.compareTo(BigDecimal.ONE) == 0 ? bytes
+                : BigDecimal.valueOf(bytes).multiply(ratio).setScale(0, RoundingMode.DOWN).longValueExact();
+        return Math.multiplyExact(scaled, direction);
     }
 
     /**
@@ -340,54 +443,54 @@ public class FlowController extends BaseController {
         return tunnel;
     }
 
-    private void accumulate(Map<String, long[]> target, String key, long in, long out) {
-        long[] sums = target.computeIfAbsent(key, k -> new long[2]);
-        sums[0] += in;
-        sums[1] += out;
+    private void accumulate(BatchContext batch, String forwardId, String userId, String userTunnelId,
+                            long in, long out) {
+        try {
+            addDelta(batch.forwardDeltas, forwardId, in, out);
+            addDelta(batch.userDeltas, userId, in, out);
+            if (!DEFAULT_USER_TUNNEL_ID.equals(userTunnelId)) {
+                addDelta(batch.tunnelDeltas, userTunnelId, in, out);
+            }
+        } catch (ArithmeticException e) {
+            throw new FlowCounterOverflow();
+        }
     }
 
-    /**
-     * 把本批次聚合后的增量一次性写库。
-     * 增量为 0 的实体直接跳过：原来是每条上报都执行一次 UPDATE ... + 0，对结果没有影响。
-     */
+    private void addDelta(Map<String, long[]> target, String key, long in, long out) {
+        long[] sums = target.computeIfAbsent(key, k -> new long[2]);
+        sums[0] = Math.addExact(sums[0], in);
+        sums[1] = Math.addExact(sums[1], out);
+        Math.addExact(sums[0], sums[1]);
+    }
+
+    /** 单次 SQL 更新实体并验证累计容量，已删除实体仍沿用原来的无操作语义。 */
     private void flushFlows(BatchContext batch) {
-        for (Map.Entry<String, long[]> entry : batch.forwardDeltas.entrySet()) {
+        flushDeltas(forwardService, batch.forwardDeltas);
+        flushDeltas(userService, batch.userDeltas);
+        flushDeltas(userTunnelService, batch.tunnelDeltas);
+    }
+
+    private <T> void flushDeltas(com.baomidou.mybatisplus.extension.service.IService<T> service,
+                                 Map<String, long[]> deltas) {
+        for (Map.Entry<String, long[]> entry : deltas.entrySet()) {
             long in = entry.getValue()[0];
             long out = entry.getValue()[1];
             if (in == 0 && out == 0) {
                 continue;
             }
-            synchronized (getForwardLock(entry.getKey())) {
-                forwardService.update(null, new UpdateWrapper<Forward>()
-                        .eq("id", entry.getKey())
-                        .setSql("in_flow = in_flow + " + in)
-                        .setSql("out_flow = out_flow + " + out));
-            }
-        }
-        for (Map.Entry<String, long[]> entry : batch.userDeltas.entrySet()) {
-            long in = entry.getValue()[0];
-            long out = entry.getValue()[1];
-            if (in == 0 && out == 0) {
-                continue;
-            }
-            synchronized (getUserLock(entry.getKey())) {
-                userService.update(null, new UpdateWrapper<User>()
-                        .eq("id", entry.getKey())
-                        .setSql("in_flow = in_flow + " + in)
-                        .setSql("out_flow = out_flow + " + out));
-            }
-        }
-        for (Map.Entry<String, long[]> entry : batch.tunnelDeltas.entrySet()) {
-            long in = entry.getValue()[0];
-            long out = entry.getValue()[1];
-            if (in == 0 && out == 0) {
-                continue;
-            }
-            synchronized (getTunnelLock(entry.getKey())) {
-                userTunnelService.update(null, new UpdateWrapper<UserTunnel>()
-                        .eq("id", entry.getKey())
-                        .setSql("in_flow = in_flow + " + in)
-                        .setSql("out_flow = out_flow + " + out));
+            // 历史统计读的是 long 总和；用减法检查两方向累计后仍在该范围。
+            // SQLite 的 INTEGER 相加越界会改用 REAL，条件内避免执行越界加法。
+            long maxExistingTotal = Long.MAX_VALUE - in - out;
+            boolean updated = service.update(null, new UpdateWrapper<T>()
+                    .eq("id", entry.getKey())
+                    .apply("typeof(COALESCE(in_flow, 0)) = 'integer' AND typeof(COALESCE(out_flow, 0)) = 'integer'")
+                    .apply("COALESCE(in_flow, 0) >= 0 AND COALESCE(out_flow, 0) >= 0")
+                    .apply("COALESCE(in_flow, 0) <= {0} - COALESCE(out_flow, 0)", maxExistingTotal)
+                    // MyBatis-Plus 3.4.1 的 setSql 不支持占位符。这里只拼接已校验的 long。
+                    .setSql("in_flow = COALESCE(in_flow, 0) + " + in)
+                    .setSql("out_flow = COALESCE(out_flow, 0) + " + out));
+            if (!updated && service.count(new QueryWrapper<T>().eq("id", entry.getKey())) > 0) {
+                throw new FlowCounterOverflow();
             }
         }
     }
@@ -405,99 +508,65 @@ public class FlowController extends BaseController {
         }
 
         Map<String, User> userSnapshots = new HashMap<>();
-        Map<String, Long> userRunning = new HashMap<>();
-        Map<String, Long> tunnelRunning = new HashMap<>();
+        Map<String, Long> userRemaining = totalsById(batch.userDeltas);
+        Map<String, Long> tunnelRemaining = totalsById(batch.tunnelDeltas);
         Map<String, UserTunnel> tunnelSnapshots = new HashMap<>();
+        long now = System.currentTimeMillis();
 
         for (FlowEvent event : batch.events) {
-            // 与原实现一致：管理员的转发（userTunnelId = 0）不参与流量限额/到期检查
-            if (Objects.equals(event.userTunnelId, DEFAULT_USER_TUNNEL_ID)) {
+            long remaining = userRemaining.compute(event.userId, (key, total) -> total - event.total());
+            // 管理员转发计入账本，但该条事件本身不触发限额/到期检查。
+            if (DEFAULT_USER_TUNNEL_ID.equals(event.userTunnelId)) {
                 continue;
             }
 
-            // 用户维度
             if (!userSnapshots.containsKey(event.userId)) {
-                User user = userService.getById(event.userId);
-                userSnapshots.put(event.userId, user);
-                if (user != null) {
-                    long batchTotal = totalOf(batch.userDeltas.get(event.userId));
-                    userRunning.put(event.userId, user.getInFlow() + user.getOutFlow() - batchTotal);
-                }
+                userSnapshots.put(event.userId, userService.getById(event.userId));
             }
             User user = userSnapshots.get(event.userId);
-            if (user != null) {
-                long current = userRunning.get(event.userId) + event.total();
-                userRunning.put(event.userId, current);
-                long userFlowLimit = user.getFlow() * BYTES_TO_GB;
-                // 与原实现一致：用户维度命中任一条就停止本维度后续判断，但用户隧道维度仍要继续检查
-                userCheck:
-                {
-                    if (userFlowLimit < current) {
-                        pauseAllUserServices(event.userId, event.name);
-                        break userCheck;
-                    }
-                    if (user.getExpTime() != null && user.getExpTime() <= System.currentTimeMillis()) {
-                        pauseAllUserServices(event.userId, event.name);
-                        break userCheck;
-                    }
-                    if (user.getStatus() != 1) {
-                        pauseAllUserServices(event.userId, event.name);
-                    }
-                }
+            if (user != null && (compareToQuota(user.getInFlow(), user.getOutFlow(), remaining, user.getFlow()) > 0
+                    || needsPause(user.getExpTime(), user.getStatus(), now))) {
+                batch.pauses.add(() -> pauseAllUserServices(event.userId, event.name));
             }
 
-            // 用户隧道维度
+            long tunnelBytesRemaining = tunnelRemaining.compute(event.userTunnelId,
+                    (key, total) -> total - event.total());
             if (!tunnelSnapshots.containsKey(event.userTunnelId)) {
-                UserTunnel userTunnel = userTunnelService.getById(event.userTunnelId);
-                tunnelSnapshots.put(event.userTunnelId, userTunnel);
-                if (userTunnel != null) {
-                    long batchTotal = totalOf(batch.tunnelDeltas.get(event.userTunnelId));
-                    tunnelRunning.put(event.userTunnelId,
-                            userTunnel.getInFlow() + userTunnel.getOutFlow() - batchTotal);
-                }
+                tunnelSnapshots.put(event.userTunnelId, userTunnelService.getById(event.userTunnelId));
             }
             UserTunnel userTunnel = tunnelSnapshots.get(event.userTunnelId);
-            if (userTunnel == null) {
-                continue;
-            }
-            long current = tunnelRunning.get(event.userTunnelId) + event.total();
-            tunnelRunning.put(event.userTunnelId, current);
-            if (current >= userTunnel.getFlow() * BYTES_TO_GB) {
-                pauseSpecificForward(userTunnel.getTunnelId(), event.name, event.userId);
-                continue;
-            }
-            if (userTunnel.getExpTime() != null && userTunnel.getExpTime() <= System.currentTimeMillis()) {
-                pauseSpecificForward(userTunnel.getTunnelId(), event.name, event.userId);
-                continue;
-            }
-            if (userTunnel.getStatus() != 1) {
-                pauseSpecificForward(userTunnel.getTunnelId(), event.name, event.userId);
+            if (userTunnel != null && (compareToQuota(userTunnel.getInFlow(), userTunnel.getOutFlow(),
+                    tunnelBytesRemaining, userTunnel.getFlow()) >= 0
+                    || needsPause(userTunnel.getExpTime(), userTunnel.getStatus(), now))) {
+                batch.pauses.add(() -> pauseSpecificForward(userTunnel.getTunnelId(), event.name, event.userId));
             }
         }
     }
 
-    /**
-     * 记录实时速率：使用已按倍率/计费换算后的增量，与流量累计口径一致
-     */
-    private void recordRealtimeRate(String forwardId, String userId, Forward forward, FlowDto flowData) {
-        try {
-            long inBytes = flowData.getD() == null ? 0L : flowData.getD();
-            long outBytes = flowData.getU() == null ? 0L : flowData.getU();
-            realtimeFlowTracker.record(
-                    Long.parseLong(forwardId),
-                    Integer.parseInt(userId),
-                    forward == null ? null : forward.getUserName(),
-                    inBytes,
-                    outBytes
-            );
-        } catch (NumberFormatException e) {
-            // 服务名异常时不影响正常流量统计
-            log.debug("服务名解析失败，跳过实时速率统计: {}", flowData.getN());
+    private static int compareToQuota(Long in, Long out, long remaining, Long quotaGb) {
+        // 配额或旧快照允许超出 long 的中间范围。空配额不作流量比较，状态和到期检查仍生效。
+        if (quotaGb == null) {
+            return -1;
         }
+        BigInteger current = BigInteger.valueOf(in == null ? 0L : in)
+                .add(BigInteger.valueOf(out == null ? 0L : out)).subtract(BigInteger.valueOf(remaining));
+        return current.compareTo(BigInteger.valueOf(quotaGb).multiply(BYTES_TO_GB));
     }
 
-    private long totalOf(long[] sums) {
-        return sums == null ? 0L : sums[0] + sums[1];
+    private static boolean needsPause(Long expTime, Integer status, long now) {
+        return (expTime != null && expTime <= now) || !Objects.equals(status, 1);
+    }
+
+    /** 使用与已提交账本一致的倍率/计费字节。 */
+    private void recordRealtimeRate(FlowEvent event, Forward forward) {
+        realtimeFlowTracker.record(Long.parseLong(event.forwardId), Integer.parseInt(event.userId),
+                forward == null ? null : forward.getUserName(), event.inDelta, event.outDelta);
+    }
+
+    private Map<String, Long> totalsById(Map<String, long[]> deltas) {
+        Map<String, Long> totals = new HashMap<>();
+        deltas.forEach((key, sums) -> totals.put(key, sums[0] + sums[1]));
+        return totals;
     }
 
     /**
@@ -512,7 +581,14 @@ public class FlowController extends BaseController {
         final Map<String, long[]> userDeltas = new LinkedHashMap<>();
         final Map<String, long[]> tunnelDeltas = new LinkedHashMap<>();
         final List<FlowEvent> events = new ArrayList<>();
+        final List<Runnable> pauses = new ArrayList<>();
     }
+
+    private static class BatchIdConflict extends RuntimeException {}
+
+    private static class FlowCounterOverflow extends RuntimeException {}
+
+    private static class FlowBillingUnavailable extends RuntimeException {}
 
     /**
      * 单条上报事件的增量（用于按消息顺序还原累计值）
@@ -545,25 +621,12 @@ public class FlowController extends BaseController {
     }
 
     public void checkUserTunnelRelatedLimits(String userTunnelId, String name, String userId) {
-
         UserTunnel userTunnel = userTunnelService.getById(userTunnelId);
-        if (userTunnel == null) return;
-        long flow = userTunnel.getInFlow() + userTunnel.getOutFlow();
-        if (flow >= userTunnel.getFlow() * BYTES_TO_GB) {
-            pauseSpecificForward(userTunnel.getTunnelId(), name, userId);
-            return;
-        }
-
-        if (userTunnel.getExpTime() != null && userTunnel.getExpTime() <= System.currentTimeMillis()) {
-            pauseSpecificForward(userTunnel.getTunnelId(), name, userId);
-            return;
-        }
-
-        if (userTunnel.getStatus() != 1) {
+        if (userTunnel != null && (compareToQuota(userTunnel.getInFlow(), userTunnel.getOutFlow(),
+                0L, userTunnel.getFlow()) >= 0 || needsPause(userTunnel.getExpTime(), userTunnel.getStatus(),
+                System.currentTimeMillis()))) {
             pauseSpecificForward(userTunnel.getTunnelId(), name, userId);
         }
-
-
     }
 
     private void pauseSpecificForward(Integer tunnelId, String name, String userId) {
@@ -577,21 +640,9 @@ public class FlowController extends BaseController {
             for (ChainTunnel chainTunnel : chainTunnels) {
                 GostUtil.PauseAndResumeService(chainTunnel.getNodeId(), name, "PauseService");
             }
-            forward.setStatus(0);
-            forwardService.updateById(forward);
+            // 暂停只改状态，避免把其他批次刚提交的计数覆盖为查询时的旧值。
+            forwardService.update(null, new UpdateWrapper<Forward>().eq("id", forward.getId()).set("status", 0));
         }
-    }
-
-    private Object getUserLock(String userId) {
-        return USER_LOCKS[Math.floorMod(userId.hashCode(), LOCK_STRIPES)];
-    }
-
-    private Object getTunnelLock(String userTunnelId) {
-        return TUNNEL_LOCKS[Math.floorMod(userTunnelId.hashCode(), LOCK_STRIPES)];
-    }
-
-    private Object getForwardLock(String forwardId) {
-        return FORWARD_LOCKS[Math.floorMod(forwardId.hashCode(), LOCK_STRIPES)];
     }
 
     private boolean isValidNode(String secret) {
@@ -600,10 +651,16 @@ public class FlowController extends BaseController {
     }
 
     private String[] parseServiceName(String serviceName) {
-        return serviceName.split("_");
-    }
-
-    private String buildServiceName(String forwardId, String userId, String userTunnelId) {
-        return forwardId + "_" + userId + "_" + userTunnelId;
+        String[] ids = serviceName.split("_", -1);
+        if (ids.length != 3 || !SERVICE_ID_PATTERN.matcher(ids[0]).matches()
+                || !SERVICE_ID_PATTERN.matcher(ids[1]).matches() || !SERVICE_ID_PATTERN.matcher(ids[2]).matches()) {
+            return null;
+        }
+        if (Long.parseLong(ids[0]) == 0 || Integer.parseInt(ids[1]) == 0) {
+            throw new IllegalArgumentException("expected positive forward and user IDs");
+        }
+        // 管理员自建转发使用 0 作为用户隧道标识。
+        Integer.parseInt(ids[2]);
+        return ids;
     }
 }

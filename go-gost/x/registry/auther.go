@@ -26,14 +26,21 @@ func (r *autherRegistry) get(name string) auth.Authenticator {
 }
 
 type autherWrapper struct {
-	name string
-	r    *autherRegistry
+	name   string
+	r      *autherRegistry
+	strict bool
 }
 
 func (w *autherWrapper) Authenticate(ctx context.Context, user, password string, opts ...auth.Option) (string, bool) {
 	v := w.r.get(w.name)
 	if v == nil {
-		return "", true
+		return "", !w.strict
 	}
 	return v.Authenticate(ctx, user, password, opts...)
+}
+
+// StrictAuther is a live named authenticator for management listeners. A
+// missing entry denies access while a reload is in progress or after deletion.
+func StrictAuther(name string) auth.Authenticator {
+	return &autherWrapper{name: name, r: autherReg.(*autherRegistry), strict: true}
 }

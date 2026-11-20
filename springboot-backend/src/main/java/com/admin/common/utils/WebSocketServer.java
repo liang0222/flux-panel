@@ -4,8 +4,8 @@ package com.admin.common.utils;
 import com.admin.common.dto.GostDto;
 import com.admin.entity.Node;
 import com.admin.service.NodeService;
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -90,7 +90,7 @@ public class WebSocketServer extends TextWebSocketHandler {
                     // 先发送确认消息
                     sendToUser(session, "{\"type\":\"call\"}", nodeSecret);
                 }else if (decryptedPayload.contains("requestId")) {
-                    log.info("收到消息: {}", decryptedPayload);
+                    log.debug("收到 WebSocket 消息");
                     // 处理命令响应消息
                     try {
                         JSONObject responseJson = JSONObject.parseObject(decryptedPayload);
@@ -122,10 +122,10 @@ public class WebSocketServer extends TextWebSocketHandler {
                             }
                         }
                     } catch (Exception e) {
-                        log.info("处理响应消息失败: {}", e.getMessage(), e);
+                        log.info("处理响应消息失败: {}", e.getClass().getName());
                     }
                 } else {
-                    log.info("收到消息: {}", decryptedPayload);
+                    log.debug("收到 WebSocket 消息");
                 }
 
                 // 如果是节点类型，转发消息给其他会话
@@ -145,7 +145,7 @@ public class WebSocketServer extends TextWebSocketHandler {
                 }
             }
         } catch (Exception e) {
-            log.info("处理WebSocket消息时发生异常: {}", e.getMessage(), e);
+            log.info("处理WebSocket消息时发生异常: {}", e.getClass().getName());
         }
     }
 
@@ -175,7 +175,7 @@ public class WebSocketServer extends TextWebSocketHandler {
             }
         } catch (Exception e) {
             // 解析失败，可能是非加密格式，直接返回原始数据
-            log.info("WebSocket消息未加密或解密失败，使用原始数据: {}", e.getMessage());
+            log.debug("WebSocket消息未匹配加密格式或解密失败: {}", e.getClass().getName());
         }
         
         return payload;
@@ -203,7 +203,7 @@ public class WebSocketServer extends TextWebSocketHandler {
                 return encryptedMessage.toJSONString();
             }
         } catch (Exception e) {
-            log.info("⚠️ WebSocket消息加密失败，发送原始数据: {}", e.getMessage());
+            log.info("WebSocket消息加密失败，回退到原格式: {}", e.getClass().getName());
         }
 
         return message;
@@ -239,7 +239,6 @@ public class WebSocketServer extends TextWebSocketHandler {
                 String socks = (String) session.getAttributes().get("socks");
                 
                 log.info("节点 {} 尝试连接，开始处理连接逻辑", nodeId);
-                log.info("屏蔽协议数据:http->{}, tls->{}, socks->{}", http, tls, socks);
                 
                 // 检查是否已有该节点的连接，如果有则记录日志但直接覆盖
                 WebSocketSession existingSession = nodeSessions.get(nodeId);
@@ -262,7 +261,7 @@ public class WebSocketServer extends TextWebSocketHandler {
                         log.info("主动关闭节点 {} 的旧连接: {}", nodeId, existingSession.getId());
                         existingSession.close();
                     } catch (Exception e) {
-                        log.info("关闭节点 {} 旧连接失败: {}", nodeId, e.getMessage());
+                        log.info("关闭节点 {} 旧连接失败: {}", nodeId, e.getClass().getName());
                     }
                 }
                 
@@ -287,7 +286,7 @@ public class WebSocketServer extends TextWebSocketHandler {
                     boolean updateResult = nodeService.updateById(node);
                     
                     if (updateResult) {
-                        log.info("节点 {} 连接建立成功，状态更新为在线，版本: {}", nodeId, version);
+                        log.info("节点 {} 连接建立成功，状态更新为在线", nodeId);
                         
                         // 广播节点上线状态给所有管理员
                         JSONObject res = new JSONObject();
@@ -306,7 +305,7 @@ public class WebSocketServer extends TextWebSocketHandler {
             }
 
         } catch (Exception e) {
-            log.info("建立连接时发生异常: {}", e.getMessage(), e);
+            log.info("建立连接时发生异常: {}", e.getClass().getName());
             // 异常情况下，确保清理会话
             try {
                 String id = session.getAttributes().get("id").toString();
@@ -317,7 +316,7 @@ public class WebSocketServer extends TextWebSocketHandler {
                     log.info("由于异常，移除节点 {} 的会话", nodeId);
                 }
             } catch (Exception cleanupException) {
-                log.info("清理异常会话时出错: {}", cleanupException.getMessage());
+                log.info("清理异常会话时出错: {}", cleanupException.getClass().getName());
             }
         }
     }
@@ -343,7 +342,7 @@ public class WebSocketServer extends TextWebSocketHandler {
             String type = session.getAttributes().get("type").toString();
             String sessionId = session.getId();
             
-            log.info("连接关闭，ID: {}, 类型: {}, 状态: {}", id, type, status);
+            log.info("连接关闭，关闭码: {}", status == null ? "-" : status.getCode());
             
             if (!Objects.equals(type, "1")) {
                 // 管理员连接关闭
@@ -391,7 +390,7 @@ public class WebSocketServer extends TextWebSocketHandler {
             sessionLocks.remove(sessionId);
 
         } catch (Exception e) {
-            log.info("关闭连接时发生异常: {}", e.getMessage(), e);
+            log.info("关闭连接时发生异常: {}", e.getClass().getName());
         }
     }
 
@@ -422,7 +421,7 @@ public class WebSocketServer extends TextWebSocketHandler {
                         socketSession.sendMessage(new TextMessage(finalMessage));
                     }
                 } catch (Exception e) {
-                    log.info("发送WebSocket消息失败 [sessionId={}]: {}", sessionId, e.getMessage());
+                    log.info("发送WebSocket消息失败 [sessionId={}]: {}", sessionId, e.getClass().getName());
                     cleanupSession(socketSession);
                 }
             }
@@ -500,7 +499,7 @@ public class WebSocketServer extends TextWebSocketHandler {
             sendToUser(nodeSession, data.toJSONString(), nodeSecret);
             GostDto result = future.get(10, TimeUnit.SECONDS);
             
-            log.info("成功发送消息到节点 {} 并收到响应: {}", node_id, result.getMsg());
+            log.info("成功发送消息到节点 {} 并收到响应", node_id);
             return result;
             
         } catch (Exception e) {
@@ -513,7 +512,7 @@ public class WebSocketServer extends TextWebSocketHandler {
                 log.info("节点 {} 响应超时，可能存在连接问题", node_id);
             } else {
                 result.setMsg("发送消息失败: " + e.getMessage());
-                log.info("发送消息到节点 {} 失败: {}", node_id, e.getMessage(), e);
+                log.info("发送消息到节点 {} 失败: {}", node_id, e.getClass().getName());
             }
             return result;
         }

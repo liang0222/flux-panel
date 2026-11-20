@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"io"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -10,15 +11,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var (
-	v = viper.GetViper()
-)
-
-func init() {
+func newConfigReader(dirs ...string) *viper.Viper {
+	v := viper.New()
 	v.SetConfigName("gost")
-	v.AddConfigPath("/etc/gost/")
-	v.AddConfigPath("$HOME/.gost/")
-	v.AddConfigPath(".")
+	if len(dirs) == 0 {
+		dirs = []string{"/etc/gost/", "$HOME/.gost/", "."}
+	}
+	for _, dir := range dirs {
+		v.AddConfigPath(dir)
+	}
+	return v
+}
+
+func FindConfigFile(dirs ...string) (string, error) {
+	v := newConfigReader(dirs...)
+	if err := v.ReadInConfig(); err != nil {
+		return "", err
+	}
+	return filepath.Abs(v.ConfigFileUsed())
 }
 
 var (
@@ -40,6 +50,20 @@ func Set(c *Config) {
 	defer globalMux.Unlock()
 
 	global = c
+}
+
+// RuntimeMu orders management mutations against full reload and shutdown.
+var RuntimeMu sync.Mutex
+
+// Replace publishes c only if applying it to the runtime succeeds.
+func Replace(c *Config, apply func(old *Config) error) error {
+	globalMux.Lock()
+	defer globalMux.Unlock()
+	if err := apply(global); err != nil {
+		return err
+	}
+	global = c
+	return nil
 }
 
 func OnUpdate(f func(c *Config) error) error {
@@ -570,6 +594,7 @@ type Config struct {
 }
 
 func (c *Config) Load() error {
+	v := newConfigReader()
 	if err := v.ReadInConfig(); err != nil {
 		return err
 	}
@@ -578,6 +603,8 @@ func (c *Config) Load() error {
 }
 
 func (c *Config) Read(r io.Reader) error {
+	v := newConfigReader()
+	v.SetConfigType("yaml")
 	if err := v.ReadConfig(r); err != nil {
 		return err
 	}
@@ -586,6 +613,7 @@ func (c *Config) Read(r io.Reader) error {
 }
 
 func (c *Config) ReadFile(file string) error {
+	v := newConfigReader()
 	v.SetConfigFile(file)
 	if err := v.ReadInConfig(); err != nil {
 		return err
@@ -598,8 +626,7 @@ func (c *Config) Write(w io.Writer, format string) error {
 	case "json":
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		enc.Encode(c)
-		return nil
+		return enc.Encode(c)
 	case "yaml":
 		fallthrough
 	default:

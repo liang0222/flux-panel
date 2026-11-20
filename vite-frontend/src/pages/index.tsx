@@ -4,7 +4,8 @@ import { Card, CardBody, CardHeader } from "@heroui/card";
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import toast from 'react-hot-toast';
-import axios from 'axios';
+import { getActivePanel, getBaseURL, getPanelRevision } from '@/api/network';
+import { saveSession } from '@/utils/auth';
 import { isWebViewFunc } from '@/utils/panel';
 import { siteConfig } from '@/config/site';
 import { title } from "@/components/primitives";
@@ -108,8 +109,9 @@ export default function IndexPage() {
         tacInstanceRef.current = null;
       }
 
-      // 使用axios的baseURL，确保在WebView中使用正确的面板地址
-      const baseURL = axios.defaults.baseURL || (import.meta.env.VITE_API_BASE ? `${import.meta.env.VITE_API_BASE}/api/v1/` : '/api/v1/');
+      // 验证码与登录使用同一个面板地址。
+      const baseURL = getBaseURL();
+      if (!baseURL) throw new Error('请先设置面板地址');
       
       const config: CaptchaConfig = {
         requestCaptchaDataUrl: `${baseURL}captcha/generate`,
@@ -174,6 +176,8 @@ export default function IndexPage() {
         captchaId: form.captchaId,
       };
 
+      const panel = getActivePanel();
+      const revision = getPanelRevision();
       const response = await login(loginData);
       
       if (response.code !== 0) {
@@ -181,22 +185,16 @@ export default function IndexPage() {
         return;
       }
 
-      // 检查是否需要强制修改密码
-      if (response.data.requirePasswordChange) {
-        localStorage.setItem('token', response.data.token);
-        localStorage.setItem("role_id", response.data.role_id.toString());
-        localStorage.setItem("name", response.data.name);
-        localStorage.setItem("admin", (response.data.role_id === 0).toString());
+      const { token, role_id, name, requirePasswordChange } = response.data;
+      if (revision !== getPanelRevision()) return;
+      await saveSession({ token, role_id: role_id.toString(), name, admin: (role_id === 0).toString() },
+        panel, () => revision === getPanelRevision());
+
+      if (requirePasswordChange) {
         toast.success('检测到默认密码，即将跳转到修改密码页面');
-        navigate("/change-password");
+        navigate('/change-password');
         return;
       }
-
-      // 保存登录信息
-      localStorage.setItem('token', response.data.token);
-      localStorage.setItem("role_id", response.data.role_id.toString());
-      localStorage.setItem("name", response.data.name);
-      localStorage.setItem("admin", (response.data.role_id === 0).toString());
 
       // 登录成功
       toast.success('登录成功');

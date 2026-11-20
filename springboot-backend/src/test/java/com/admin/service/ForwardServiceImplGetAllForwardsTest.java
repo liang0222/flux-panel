@@ -42,7 +42,7 @@ import static org.mockito.Mockito.when;
  */
 class ForwardServiceImplGetAllForwardsTest {
 
-    private static final String SECRET = "unit-test-secret-key";
+    private static final String SECRET = "forward-service-test-fixture-2026-key";
 
     private ForwardServiceImpl forwardService;
     private ForwardMapper forwardMapper;

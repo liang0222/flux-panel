@@ -11,7 +11,8 @@ import { Alert } from "@heroui/alert";
 import { Progress } from "@heroui/progress";
 import { Accordion, AccordionItem } from "@heroui/accordion";
 import toast from 'react-hot-toast';
-import axios from 'axios';
+import { getBaseURL } from '@/api/network';
+import { getToken } from '@/utils/auth';
 
 
 import { 
@@ -140,12 +141,15 @@ export default function NodePage() {
       closeWebSocket();
     }
     
-    // 构建WebSocket URL，使用axios的baseURL
-    const baseUrl = axios.defaults.baseURL || (import.meta.env.VITE_API_BASE ? `${import.meta.env.VITE_API_BASE}/api/v1/` : '/api/v1/');
-    const wsUrl = baseUrl.replace(/^http/, 'ws').replace(/\/api\/v1\/$/, '') + `/system-info?type=0&secret=${localStorage.getItem('token')}`;
-    
+    const baseURL = getBaseURL();
+    const token = getToken();
+    if (!baseURL || !token) return;
+
     try {
-      websocketRef.current = new WebSocket(wsUrl);
+      const url = new URL(baseURL.replace(/\/api\/v1\/$/, '/system-info'), window.location.href);
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      url.search = new URLSearchParams({ type: '0', secret: token }).toString();
+      websocketRef.current = new WebSocket(url);
       
       websocketRef.current.onopen = () => {
         reconnectAttemptsRef.current = 0;

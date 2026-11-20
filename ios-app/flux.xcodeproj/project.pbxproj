@@ -23,7 +23,12 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXBuildFile section */
+		F11001012E56AAF700DC77A3 /* WebApp in Resources */ = {isa = PBXBuildFile; fileRef = F11001022E56AAF700DC77A3 /* WebApp */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
+		F11001022E56AAF700DC77A3 /* WebApp */ = {isa = PBXFileReference; lastKnownFileType = folder; path = WebApp; sourceTree = "<group>"; };
 		296FEB7C2E56AAF700DC77A3 /* flux.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = flux.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		296FEB892E56AAF900DC77A3 /* fluxTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = fluxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		296FEB932E56AAF900DC77A3 /* fluxUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = fluxUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -76,6 +81,7 @@
 			isa = PBXGroup;
 			children = (
 				296FEB7E2E56AAF700DC77A3 /* flux */,
+				F11001022E56AAF700DC77A3 /* WebApp */,
 				296FEB8C2E56AAF900DC77A3 /* fluxTests */,
 				296FEB962E56AAF900DC77A3 /* fluxUITests */,
 				296FEB7D2E56AAF700DC77A3 /* Products */,
@@ -212,6 +218,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F11001012E56AAF700DC77A3 /* WebApp in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

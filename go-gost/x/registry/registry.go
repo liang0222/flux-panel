@@ -3,6 +3,7 @@ package registry
 import (
 	"errors"
 	"io"
+	"maps"
 	"sync"
 
 	"github.com/go-gost/core/admission"
@@ -57,52 +58,71 @@ var (
 )
 
 type registry[T any] struct {
-	m sync.Map
+	mu     sync.RWMutex
+	values map[string]T
+}
+
+// Replace swaps complete registry maps and leaves cleanup of the old values
+// to the caller. The new map is copied so the staging owner cannot mutate it.
+func Replace[T any](r reg.Registry[T], values map[string]T) map[string]T {
+	return r.(interface {
+		replace(map[string]T) map[string]T
+	}).replace(values)
+}
+
+func (r *registry[T]) replace(values map[string]T) map[string]T {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	old := r.values
+	r.values = maps.Clone(values)
+	return old
 }
 
 func (r *registry[T]) Register(name string, v T) error {
 	if name == "" {
 		return nil
 	}
-	if _, loaded := r.m.LoadOrStore(name, v); loaded {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, loaded := r.values[name]; loaded {
 		return ErrDup
 	}
-
+	if r.values == nil {
+		r.values = make(map[string]T)
+	}
+	r.values[name] = v
 	return nil
 }
 
 func (r *registry[T]) Unregister(name string) {
-	if v, ok := r.m.Load(name); ok {
-		if closer, ok := v.(io.Closer); ok {
+	r.mu.Lock()
+	v, ok := r.values[name]
+	delete(r.values, name)
+	r.mu.Unlock()
+	if ok {
+		if closer, ok := any(v).(io.Closer); ok {
 			closer.Close()
 		}
-		r.m.Delete(name)
 	}
 }
 
 func (r *registry[T]) IsRegistered(name string) bool {
-	_, ok := r.m.Load(name)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.values[name]
 	return ok
 }
 
-func (r *registry[T]) Get(name string) (t T) {
-	if name == "" {
-		return
-	}
-	v, _ := r.m.Load(name)
-	t, _ = v.(T)
-	return
+func (r *registry[T]) Get(name string) T {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.values[name]
 }
 
-func (r *registry[T]) GetAll() (m map[string]T) {
-	m = make(map[string]T)
-	r.m.Range(func(key, value any) bool {
-		k, _ := key.(string)
-		v, _ := value.(T)
-		m[k] = v
-		return true
-	})
-	return
+func (r *registry[T]) GetAll() map[string]T {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return maps.Clone(r.values)
 }
 
 func ListenerRegistry() reg.Registry[NewListener] {

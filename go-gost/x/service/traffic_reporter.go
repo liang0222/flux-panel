@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -56,43 +58,23 @@ type TrafficReportItem struct {
 	D int64  `json:"d"` // 下行流量（down缩写）
 }
 
-// maskSecretInURL 把 URL 查询串里的 secret 参数值替换为掩码。
-// secret 是节点身份凭据，err 里带上完整 URL 会把明文写进 journald 长期留存。
-// 保留首尾各 4 位便于比对是哪一份配置；解析失败时返回不含查询串的占位文案。
-func maskSecretInURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "(URL 解析失败)"
-	}
-	q := u.Query()
-	if v := q.Get("secret"); v != "" {
-		if len(v) <= 8 {
-			q.Set("secret", "****")
-		} else {
-			q.Set("secret", v[:4]+"****"+v[len(v)-4:])
-		}
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
+func SetHTTPReportURL(addr string, secret string) {
+	q := url.Values{"secret": {secret}}.Encode()
+	httpReportURL = (&url.URL{Scheme: "http", Host: addr, Path: "/flow/upload", RawQuery: q}).String()
+	configReportURL = (&url.URL{Scheme: "http", Host: addr, Path: "/flow/config", RawQuery: q}).String()
+	httpAESCrypto, _ = crypto.NewAESCrypto(secret)
 }
 
-func SetHTTPReportURL(addr string, secret string) {
-	httpReportURL = "http://" + addr + "/flow/upload?secret=" + secret
-	configReportURL = "http://" + addr + "/flow/config?secret=" + secret
-
-	// 创建 AES 加密器
-	var err error
-	httpAESCrypto, err = crypto.NewAESCrypto(secret)
-	if err != nil {
-		fmt.Printf("❌ 创建 HTTP AES 加密器失败: %v\n", err)
-		httpAESCrypto = nil
-	} else {
-		fmt.Printf("🔐 HTTP AES 加密器创建成功\n")
+func reportRequestError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("HTTP transport failed: %w", urlErr.Err)
 	}
+	return err
 }
 
 // sendBatchTrafficReport 批量发送多个服务的流量报告到HTTP接口
-func sendBatchTrafficReport(ctx context.Context, reportItems []TrafficReportItem) (bool, error) {
+func sendBatchTrafficReport(ctx context.Context, batchID string, reportItems []TrafficReportItem) (bool, error) {
 	jsonData, err := json.Marshal(reportItems)
 	if err != nil {
 		return false, fmt.Errorf("序列化报告数据失败: %v", err)
@@ -130,38 +112,32 @@ func sendBatchTrafficReport(ctx context.Context, reportItems []TrafficReportItem
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "GOST-Traffic-Reporter/1.0")
+	req.Header.Set("X-Flow-Batch-Id", batchID)
 
 	client := trafficReportClient
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// err 会带上完整请求 URL（含 secret），这里替换成脱敏后的 URL，
-		// 否则失败日志会把节点凭据明文写进 journald。
-		return false, fmt.Errorf("发送HTTP请求失败: %s", strings.Replace(err.Error(), req.URL.String(), maskSecretInURL(req.URL.String()), 1))
+		return false, reportRequestError(err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("HTTP响应错误: %d %s", resp.StatusCode, resp.Status)
-	}
-
-	// 读取响应内容
-	var responseBytes bytes.Buffer
-	_, err = responseBytes.ReadFrom(resp.Body)
-	if err != nil {
-		return false, fmt.Errorf("读取响应内容失败: %v", err)
-	}
-
-	responseText := strings.TrimSpace(responseBytes.String())
-
-	// 检查响应是否为"ok"
-	if responseText == "ok" {
-		return true, nil
-	} else {
-		return false, fmt.Errorf("服务器响应: %s (期望: ok)", responseText)
-	}
+	return checkReportAck(resp)
 }
 
+func checkReportAck(resp *http.Response) (bool, error) {
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("HTTP acknowledgement status %d", resp.StatusCode)
+	}
+	const maxAck = 4096
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAck+1))
+	if err != nil {
+		return false, fmt.Errorf("read HTTP acknowledgement: %w", err)
+	}
+	if len(body) > maxAck || strings.TrimSpace(string(body)) != "ok" {
+		return false, fmt.Errorf("unexpected HTTP acknowledgement")
+	}
+	return true, nil
+}
 
 // sendConfigReport 发送配置报告到HTTP接口
 func sendConfigReport(ctx context.Context) (bool, error) {
@@ -212,71 +188,26 @@ func sendConfigReport(ctx context.Context) (bool, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// err 会带上完整请求 URL（含 secret），这里替换成脱敏后的 URL，
-		// 否则失败日志会把节点凭据明文写进 journald。
-		return false, fmt.Errorf("发送HTTP请求失败: %s", strings.Replace(err.Error(), req.URL.String(), maskSecretInURL(req.URL.String()), 1))
+		return false, reportRequestError(err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("HTTP响应错误: %d %s", resp.StatusCode, resp.Status)
-	}
-
-	// 读取响应内容
-	var responseBytes bytes.Buffer
-	_, err = responseBytes.ReadFrom(resp.Body)
-	if err != nil {
-		return false, fmt.Errorf("读取响应内容失败: %v", err)
-	}
-
-	responseText := strings.TrimSpace(responseBytes.String())
-
-	// 检查响应是否为"ok"
-	if responseText == "ok" {
-		return true, nil
-	} else {
-		return false, fmt.Errorf("服务器响应: %s (期望: ok)", responseText)
-	}
+	return checkReportAck(resp)
 }
 
-// StartConfigReporter 启动配置定时上报器（每10分钟上报一次）
+// StartConfigReporter keeps at most one configuration report in flight.
 func StartConfigReporter(ctx context.Context) {
 	if configReportURL == "" {
-		fmt.Printf("⚠️ 配置上报URL未设置，跳过定时上报\n")
 		return
 	}
-
-	fmt.Printf("🚀 配置定时上报器已启动，每10分钟上报一次（WebSocket连接稳定后启动）\n")
-
-	// 创建10分钟定时器
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-
-	// 立即执行一次配置上报
-	go func() {
-		success, err := sendConfigReport(ctx)
-		if err != nil {
-			fmt.Printf("❌ 初始配置上报失败: %v\n", err)
-		} else if success {
-			fmt.Printf("✅ 初始配置上报成功\n")
+	for ctx.Err() == nil {
+		if _, err := sendConfigReport(ctx); err != nil && ctx.Err() == nil {
+			fmt.Printf("配置上报失败: %v\n", err)
 		}
-	}()
-
-	// 定时上报循环
-	for {
 		select {
 		case <-ticker.C:
-			go func() {
-				success, err := sendConfigReport(ctx)
-				if err != nil {
-					fmt.Printf("❌ 定时配置上报失败: %v\n", err)
-				} else if success {
-					fmt.Printf("✅ 定时配置上报成功\n")
-				}
-			}()
-
 		case <-ctx.Done():
-			fmt.Printf("⏹️ 配置定时上报器已停止\n")
 			return
 		}
 	}
@@ -287,14 +218,9 @@ type serviceStatus interface {
 	Status() *Status
 }
 
-// getConfigResponse 配置响应结构
-type getConfigResponse struct {
-	Config *config.Config `json:"config"`
-}
-
-// getConfigData 获取配置数据（避免循环依赖）
 func getConfigData() ([]byte, error) {
-	config.OnUpdate(func(c *config.Config) error {
+	buf := &bytes.Buffer{}
+	err := config.OnUpdate(func(c *config.Config) error {
 		for _, svc := range c.Services {
 			if svc == nil {
 				continue
@@ -326,13 +252,7 @@ func getConfigData() ([]byte, error) {
 				}
 			}
 		}
-		return nil
+		return c.Write(buf, "json")
 	})
-
-	var resp getConfigResponse
-	resp.Config = config.Global()
-
-	buf := &bytes.Buffer{}
-	resp.Config.Write(buf, "json")
-	return buf.Bytes(), nil
+	return buf.Bytes(), err
 }

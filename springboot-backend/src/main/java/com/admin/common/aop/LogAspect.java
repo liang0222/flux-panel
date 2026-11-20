@@ -1,258 +1,69 @@
 package com.admin.common.aop;
 
-
-import cn.hutool.core.util.ArrayUtil;
-import com.admin.common.utils.JwtUtil;
-import com.alibaba.fastjson.JSON;
-import com.admin.common.utils.HttpContextUtils;
+import cn.hutool.core.lang.Validator;
+import com.admin.common.lang.R;
 import com.admin.common.utils.IpUtils;
+import com.admin.common.utils.JwtUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.JoinPoint;
-import org.aspectj.lang.annotation.*;
-import org.aspectj.lang.reflect.CodeSignature;
-import org.aspectj.lang.reflect.MethodSignature;
+import org.aspectj.lang.annotation.AfterReturning;
+import org.aspectj.lang.annotation.AfterThrowing;
+import org.aspectj.lang.annotation.Aspect;
+import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import javax.servlet.http.HttpServletRequest;
-import java.lang.reflect.Method;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @Component
 @Aspect
 @Slf4j
 public class LogAspect {
 
-    /**
-     * 请求参数日志的最大保留长度。
-     *
-     * 背景：/flow/upload 每 5 秒被节点调用一次，参数是 AES 加密后的 base64 密文，
-     * 单条可达数十 KB。生产实测该端点使 springboot-backend 的 json 日志以
-     * 约 336 KB/分钟（19 MB/小时、约 462 MB/天）增长，而密文本身无法用于排查。
-     * 这里做通用截断：正常业务的短参数完全不受影响，只压缩超长载荷，
-     * 同时保留原长度与开头片段，仍可判断「有没有收到请求、载荷有多大」。
-     */
-    private static final int MAX_PARAM_LOG_LEN = 1000;
-
-    /**
-     * 需要脱敏的字段名（大小写不敏感）。
-     *
-     * 背景：/flow/upload、/flow/config 由节点调用，参数里带 {@code secret}（节点密钥，
-     * 等同节点登录凭据）。改造前该字段被原样写进日志，生产 journal 与容器日志中可
-     * 直接读到明文 secret。这里在写日志前统一打码，只保留首尾各 4 位便于比对，
-     * 不影响任何业务逻辑与接口返回。
-     */
-    private static final Pattern SENSITIVE_JSON_FIELD = Pattern.compile(
-            "([\"'](?:secret|password|token|oldPassword|newPassword)[\"']\\s*:\\s*\")([^\"]*)(\")",
-            Pattern.CASE_INSENSITIVE);
-
-    @Pointcut("@annotation(com.admin.common.aop.LogAnnotation)")
-    public void pt() {
-
+    @AfterReturning(pointcut = "@annotation(com.admin.common.aop.LogAnnotation)", returning = "returnValue")
+    public void log(JoinPoint joinPoint, Object returnValue) {
+        logRequest(joinPoint, "正常返回", returnValue instanceof R result ? result.getCode() : "-", "-");
     }
 
-    /**
-     * 返回后通知（@AfterReturning）：在某连接点（joinpoint）
-     * 正常完成后执行的通知：例如，一个方法没有抛出任何异常，正常返回
-     * 方法执行完毕之后
-     * 注意在这里不能使用ProceedingJoinPoint
-     * 不然会报错ProceedingJoinPoint is only supported for around advice
-     * crmAspect()指向需要控制的方法
-     * returning  注解返回值
-     *
-     * @param joinPoint
-     * @param returnValue 返回值
-     * @throws Exception
-     */
-    @AfterReturning(value = "pt()", returning = "returnValue")
-    public void log(JoinPoint joinPoint, Object returnValue) throws Throwable {
-        // 获取请求信息
-        HttpServletRequest request = HttpContextUtils.getHttpServletRequest();
-        
-        // 获取请求方法类型（POST/GET等）
-        String requestMethod = request.getMethod();
-        
-        // 获取用户ID
-        String authorization = request.getHeader("Authorization") + "";
-        Object user_id = "未登录"; // 请求用户的id
-        if (!authorization.equals("null")) {
-            user_id = JwtUtil.getUserIdFromToken(authorization);
+    @AfterThrowing(pointcut = "@annotation(com.admin.common.aop.LogAnnotation)", throwing = "error")
+    public void recordLog(JoinPoint joinPoint, Throwable error) {
+        logRequest(joinPoint, "异常退出", "-", error.getClass().getName());
+    }
+
+    private void logRequest(JoinPoint joinPoint, String outcome, Object code, String exceptionType) {
+        if (!(RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes attributes)) {
+            return;
         }
-        
-        // 获取请求IP
-        String ipAddr = IpUtils.getIpAddr(request);
-        
-        // 获取方法签名信息
-        MethodSignature signature = (MethodSignature) joinPoint.getSignature();
-        Method method = signature.getMethod();
-        
-        // 获取控制器方法名
-        String className = joinPoint.getTarget().getClass().getName();
-        String methodName = signature.getName();
-        String controllerMethod = className + "." + methodName;
-        
 
-        // 获取请求参数
-        String requestParams = truncateForLog(maskSensitive(getRequestParams(joinPoint)));
-        
-        // 获取返回参数
-        String responseParams = returnValue != null ? JSON.toJSONString(returnValue) : "无返回值";
-        
-        // 合并为一条完整的日志信息
-        String logMessage = String.format(
-            "【请求日志】用户ID:[%s], IP地址:[%s], 请求方式:[%s], 控制器方法:[%s], 请求参数:[%s], 返回参数:[%s]", user_id, ipAddr, requestMethod, controllerMethod, requestParams, responseParams
-        );
-        
-        // 打印单条完整日志
-        log.info(logMessage);
+        HttpServletRequest request = attributes.getRequest();
+        HttpMethod requestMethod = HttpMethod.resolve(request.getMethod());
+        String controllerMethod = joinPoint.getSignature().getDeclaringTypeName() + "." + joinPoint.getSignature().getName();
+
+        // 仅记录白名单元数据。请求和响应数据可在任意字段、甚至自由文本中携带凭据。
+        // 不读取参数、响应内容、URI 或异常消息，也不将异常对象交给日志框架。
+        log.info("【请求日志】用户ID:[{}], IP地址:[{}], 请求方式:[{}], 控制器方法:[{}], 结果:[{}], 业务码:[{}], 异常类型:[{}]",
+                userIdForLog(request), ipForLog(request), requestMethod == null ? "-" : requestMethod,
+                controllerMethod, outcome, code, exceptionType);
     }
 
-
-    /**
-     * 抛出异常后通知（@AfterThrowing）：方法抛出异常退出时执行的通知
-     * 注意在这里不能使用ProceedingJoinPoint
-     * 不然会报错ProceedingJoinPoint is only supported for around advice
-     * throwing注解为错误信息
-     *
-     * @param joinPoint
-     * @param ex
-     */
-    @AfterThrowing(value = "pt()", throwing = "ex")
-    public void recordLog(JoinPoint joinPoint, Exception ex) {
+    private static Object userIdForLog(HttpServletRequest request) {
+        String authorization = request.getHeader("Authorization");
         try {
-            // 获取请求信息
-            HttpServletRequest request = HttpContextUtils.getHttpServletRequest();
-            
-            // 获取请求方法类型（POST/GET等）
-            String requestMethod = request.getMethod();
-            
-            // 获取用户ID
-            String authorization = request.getHeader("Authorization") + "";
-            Object user_id = "未登录"; // 请求用户的id
-            if (!authorization.equals("null")) {
-                user_id = JwtUtil.getUserIdFromToken(authorization);
+            if (authorization != null && JwtUtil.validateToken(authorization)) {
+                return JwtUtil.getUserIdFromToken(authorization);
             }
-            
-            // 获取请求IP
-            String ipAddr = IpUtils.getIpAddr(request);
-            
-            // 获取方法签名信息
-            MethodSignature signature = (MethodSignature) joinPoint.getSignature();
-            Method method = signature.getMethod();
-            
-            // 获取控制器方法名
-            String className = joinPoint.getTarget().getClass().getName();
-            String methodName = signature.getName();
-            String controllerMethod = className + "." + methodName;
-            
-
-            
-            // 获取请求参数
-            String requestParams = truncateForLog(maskSensitive(getRequestParams(joinPoint)));
-            
-            // 获取异常信息
-            String exceptionMsg = ex != null ? ex.getMessage() : "未知异常";
-            
-            // 合并为一条完整的异常日志信息
-            String errorMessage = String.format(
-                "【异常日志】用户ID:[%s], IP地址:[%s], 请求方式:[%s], 控制器方法:[%s], 请求参数:[%s], 异常信息:[%s]", user_id, ipAddr, requestMethod, controllerMethod, requestParams, exceptionMsg
-            );
-            
-            // 打印单条完整异常日志
-            log.info(errorMessage, ex);
-        } catch (Exception e) {
-            log.info("记录异常日志时出错: {}", e.getMessage());
+        } catch (RuntimeException ignored) {
+            // 日志采集不应改变控制器结果，也不记录用于校验的认证材料。
         }
-    }
-    
-    /**
-     * 获取请求参数
-     */
-    private String getRequestParams(JoinPoint joinPoint) {
-        try {
-            Object[] args = joinPoint.getArgs();
-            if (args.length == 0) {
-                return "无参数";
-            } else if (args[0] != null && args[0].toString().contains("SecurityContextHolderAwareRequestWrapper")) {
-                return JSON.toJSONString(Arrays.toString(ArrayUtil.remove(args, 0)));
-            } else {
-                // 检查是否只有一个参数且已经是JSON字符串格式
-                if (args.length == 1 && args[0] != null) {
-                    // 如果参数本身就是字符串且是JSON格式，直接返回
-                    if (args[0] instanceof String && ((String) args[0]).startsWith("{") && ((String) args[0]).endsWith("}")) {
-                        return (String) args[0];
-                    }
-                    
-                    // 如果参数是普通对象，直接序列化
-                    try {
-                        return JSON.toJSONString(args[0]);
-                    } catch (Exception e) {
-                        // 如果序列化失败，再尝试使用参数名映射
-                        Map<String, Object> map = new HashMap<>();
-                        String[] names = ((CodeSignature) joinPoint.getSignature()).getParameterNames();
-                        if (names != null) {
-                            map.put(names[0], args[0]);
-                            return JSON.toJSONString(map);
-                        }
-                        return JSON.toJSONString(args[0]);
-                    }
-                } else {
-                    // 多个参数时，使用参数名映射
-                    Map<String, Object> map = new HashMap<>();
-                    String[] names = ((CodeSignature) joinPoint.getSignature()).getParameterNames();
-                    if (names != null) {
-                        for (int i = 0; i < names.length; i++) {
-                            map.put(names[i], args[i]);
-                        }
-                    }
-                    return JSON.toJSONString(map);
-                }
-            }
-        } catch (Exception e) {
-            return "获取参数失败: " + e.getMessage();
-        }
+        return "未登录";
     }
 
-    /**
-     * 截断过长的请求参数，避免超长载荷（如加密后的流量上报）撑爆日志文件。
-     * 未超长时原样返回，行为与改造前完全一致。
-     */
-    private static String truncateForLog(String params) {
-        if (params == null || params.length() <= MAX_PARAM_LOG_LEN) {
-            return params;
+    private static String ipForLog(HttpServletRequest request) {
+        String ip = IpUtils.getIpAddr(request);
+        if (ip == null || ip.length() > 45 || ip.indexOf('%') >= 0) {
+            return "-";
         }
-        return params.substring(0, MAX_PARAM_LOG_LEN)
-                + "...(已截断，原长度 " + params.length() + " 字符)";
-    }
-
-    /**
-     * 对请求参数中的敏感字段打码，再交给日志输出。
-     * 只处理形如 {@code "secret":"xxx"} 的 JSON 片段，未命中的内容原样返回。
-     */
-    private static String maskSensitive(String params) {
-        if (params == null || params.isEmpty()) {
-            return params;
-        }
-        try {
-            Matcher m = SENSITIVE_JSON_FIELD.matcher(params);
-            StringBuffer sb = new StringBuffer(params.length());
-            while (m.find()) {
-                String value = m.group(2);
-                String masked;
-                if (value.length() <= 8) {
-                    masked = "****";
-                } else {
-                    masked = value.substring(0, 4) + "****" + value.substring(value.length() - 4);
-                }
-                m.appendReplacement(sb, Matcher.quoteReplacement(m.group(1) + masked + m.group(3)));
-            }
-            m.appendTail(sb);
-            return sb.toString();
-        } catch (Exception e) {
-            return params;
-        }
+        return Validator.isIpv4(ip) || Validator.isIpv6(ip) ? ip : "-";
     }
 }

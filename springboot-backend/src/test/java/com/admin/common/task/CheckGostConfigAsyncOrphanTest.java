@@ -7,7 +7,7 @@ import com.admin.service.ForwardService;
 import com.admin.service.NodeService;
 import com.admin.service.SpeedLimitService;
 import com.admin.service.TunnelService;
-import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson2.JSONArray;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;

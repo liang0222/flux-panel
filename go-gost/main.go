@@ -91,7 +91,7 @@ func worker(id int, args []string, ctx *context.Context, ret *int) {
 func init() {
 	flag.Var(&services, "L", "service list")
 	flag.Var(&nodes, "F", "chain node list")
-	flag.StringVar(&cfgFile, "C", "", "configuration file")
+	flag.StringVar(&cfgFile, "C", "", "configuration file or directory")
 	flag.BoolVar(&printVersion, "V", false, "print version")
 	flag.StringVar(&outputFormat, "O", "", "output format, one of yaml|json format")
 	flag.BoolVar(&debug, "D", false, "debug mode")
@@ -133,23 +133,35 @@ func main() {
 	applyMemoryLimit()
 
 	// 加载配置文件
-	config, err := LoadConfig("config.json")
+	nodePath, forwardPath, persistPath, err := resolveConfigPaths(cfgFile, len(services) == 0 && apiAddr == "")
+	if err != nil {
+		log.Fatal(err)
+	}
+	cfgFile = forwardPath
+	config, err := LoadConfig(nodePath)
 	if err != nil {
 		fmt.Printf("❌ 配置加载失败: %v\n", err)
-		fmt.Println("请确保当前目录存在 config.json 文件")
+		fmt.Printf("请检查节点配置 %s\n", nodePath)
 		os.Exit(1)
 	}
 
-	fmt.Printf("✅ 配置加载成功 - addr: %s\n", config.Addr)
+	log.Printf("节点配置: %s", nodePath)
+	if strings.HasPrefix(forwardPath, "{") {
+		log.Print("转发配置: -C inline JSON")
+	} else if forwardPath != "" {
+		log.Printf("转发配置: %s", forwardPath)
+	}
+	log.Printf("面板转发配置保存路径: %s", persistPath)
+	service.SetProtocolBlock(config.Http, config.Tls, config.Socks)
 
 	log := xlogger.NewLogger()
-	logger.SetDefault(log)
+	logger.SetDefault(xlogger.WrapDefault(log))
 
-	wsReporter := socket.StartWebSocketReporterWithConfig(config.Addr, config.Secret, config.Http, config.Tls, config.Socks, "2.0.2")
+	wsReporter := socket.StartWebSocketReporterWithConfig(config.Addr, config.Secret, config.Http, config.Tls, config.Socks, "2.0.2", nodePath, persistPath)
 	defer wsReporter.Stop()
 	service.SetHTTPReportURL(config.Addr, config.Secret)
 
-	p := &program{}
+	p := &program{stopReporter: wsReporter.Stop}
 	if err := svc.Run(p); err != nil {
 		logger.Default().Fatal(err)
 	}

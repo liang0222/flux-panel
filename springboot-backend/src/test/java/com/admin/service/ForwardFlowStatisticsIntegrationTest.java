@@ -10,8 +10,8 @@ import com.admin.entity.ForwardPort;
 import com.admin.entity.User;
 import com.admin.mapper.ForwardFlowStatisticsMapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.alibaba.fastjson.JSONArray;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 import com.admin.service.impl.ForwardFlowStatisticsServiceImpl;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -60,7 +60,7 @@ class ForwardFlowStatisticsIntegrationTest {
                 "flux-flow-test-" + UUID.randomUUID() + ".db").toString();
         registry.add("spring.datasource.url", () -> "jdbc:sqlite:" + dbFile);
         registry.add("spring.sql.init.mode", () -> "always");
-        registry.add("jwt-secret", () -> "integration-test-secret");
+        registry.add("jwt-secret", () -> "fixture-only-flow-jwt-key-038ce12a45bd37");
         registry.add("log-dir", () -> Paths.get(System.getProperty("java.io.tmpdir"), "flux-flow-test-logs").toString());
     }
 

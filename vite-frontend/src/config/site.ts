@@ -133,7 +133,6 @@ export const updateSiteConfig = async () => {
 // 清除配置缓存的工具函数
 // 缓存清除时机：
 // 1. 配置更新时：调用此函数清除所有缓存
-// 2. 退出登录时：safeLogout()中的localStorage.clear()会自动清除
 export const clearConfigCache = (keys?: string[]) => {
   if (keys && keys.length > 0) {
     // 删除指定的配置缓存

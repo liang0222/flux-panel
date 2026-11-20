@@ -4,6 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+
+	xconfig "github.com/go-gost/x/config"
 )
 
 // Config 配置结构体
@@ -13,6 +17,53 @@ type Config struct {
 	Http   int    `json:"http"`
 	Tls    int    `json:"tls"`
 	Socks  int    `json:"socks"`
+}
+
+// resolveConfigPaths keeps node identity in config.json and forwarding in gost.*.
+func resolveConfigPaths(value string, lookupDefault bool) (nodePath, forwardingPath, persistPath string, err error) {
+	value = strings.TrimSpace(value)
+	dir := "."
+	if value != "" && !strings.HasPrefix(value, "{") {
+		path, e := filepath.Abs(value)
+		if e != nil {
+			err = e
+			return
+		}
+		info, e := os.Stat(path)
+		if e != nil {
+			err = e
+			return
+		}
+		if info.IsDir() {
+			dir = path
+			forwardingPath, err = xconfig.FindConfigFile(dir)
+			if err != nil {
+				return
+			}
+		} else {
+			dir = filepath.Dir(path)
+			forwardingPath = path
+		}
+	} else if value != "" {
+		forwardingPath = value
+	} else if lookupDefault {
+		forwardingPath, err = xconfig.FindConfigFile()
+		if err != nil {
+			return
+		}
+	}
+	nodePath, err = filepath.Abs(filepath.Join(dir, "config.json"))
+	if err != nil {
+		return
+	}
+	persistPath, err = filepath.Abs(filepath.Join(dir, "gost.json"))
+	if err == nil && forwardingPath != "" && !strings.HasPrefix(forwardingPath, "{") {
+		persistPath = forwardingPath
+	}
+	if persistPath == nodePath || forwardingPath == nodePath {
+		err = fmt.Errorf("node and forwarding configurations must be separate files")
+	}
+	return
 }
 
 // LoadConfig 加载配置文件
@@ -39,5 +90,8 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("服务器地址不能为空")
 	}
 
+	if strings.TrimSpace(config.Secret) == "" {
+		return nil, fmt.Errorf("节点 secret 不能为空")
+	}
 	return &config, nil
 }

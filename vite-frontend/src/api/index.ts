@@ -14,7 +14,7 @@ export interface LoginResponse {
   requirePasswordChange?: boolean;
 }
 
-export const login = (data: LoginData) => Network.post<LoginResponse>("/user/login", data);
+export const login = (data: LoginData) => Network.post<LoginResponse>("/user/login", data, false);
 
 // 用户CRUD操作 - 全部使用POST请求
 export const createUser = (data: any) => Network.post("/user/create", data);
@@ -88,12 +88,12 @@ export const resetUserFlow = (data: { id: number; type: number }) => Network.pos
 
 // 网站配置相关接口
 export const getConfigs = () => Network.post("/config/list");
-export const getConfigByName = (name: string) => Network.post("/config/get", { name });
+export const getConfigByName = (name: string) => Network.post("/config/get", { name }, false);
 export const updateConfigs = (configMap: Record<string, string>) => Network.post("/config/update", configMap);
 export const updateConfig = (name: string, value: string) => Network.post("/config/update-single", { name, value });
 
 
 // 验证码相关接口
-export const checkCaptcha = () => Network.post("/captcha/check");
-export const generateCaptcha = () => Network.post(`/captcha/generate`);
-export const verifyCaptcha = (data: { captchaId: string; trackData: string }) => Network.post("/captcha/verify", data); 
+export const checkCaptcha = () => Network.post("/captcha/check", {}, false);
+export const generateCaptcha = () => Network.post("/captcha/generate", {}, false);
+export const verifyCaptcha = (data: { captchaId: string; trackData: string }) => Network.post("/captcha/verify", data, false);

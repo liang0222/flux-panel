@@ -3,8 +3,8 @@ package api
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
-	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-gost/core/observer/stats"
@@ -44,7 +44,11 @@ func getConfig(ctx *gin.Context) {
 	var req getConfigRequest
 	ctx.ShouldBindQuery(&req)
 
-	config.OnUpdate(func(c *config.Config) error {
+	buf := &bytes.Buffer{}
+	if req.Format != "yaml" {
+		req.Format = "json"
+	}
+	err := config.OnUpdate(func(c *config.Config) error {
 		for _, svc := range c.Services {
 			if svc == nil {
 				continue
@@ -76,19 +80,12 @@ func getConfig(ctx *gin.Context) {
 				}
 			}
 		}
-		return nil
+		return c.Write(buf, req.Format)
 	})
-	var resp getConfigResponse
-	resp.Config = config.Global()
-
-	buf := &bytes.Buffer{}
-	switch req.Format {
-	case "yaml":
-	default:
-		req.Format = "json"
+	if err != nil {
+		writeError(ctx, NewError(http.StatusInternalServerError, ErrCodeSaveConfigFailed, "serialize config failed"))
+		return
 	}
-
-	resp.Config.Write(buf, req.Format)
 
 	contentType := "application/json"
 	if req.Format == "yaml" {
@@ -140,18 +137,9 @@ func saveConfig(ctx *gin.Context) {
 		file = req.Path
 	}
 
-	f, err := os.Create(file)
-	if err != nil {
-		writeError(ctx, &Error{
-			statusCode: http.StatusInternalServerError,
-			Code:       ErrCodeSaveConfigFailed,
-			Msg:        fmt.Sprintf("create file: %s", err.Error()),
-		})
-		return
-	}
-	defer f.Close()
-
-	if err := config.Global().Write(f, req.Format); err != nil {
+	if err := config.OnUpdate(func(c *config.Config) error {
+		return config.WriteFileAtomic(file, func(w io.Writer) error { return c.Write(w, req.Format) })
+	}); err != nil {
 		writeError(ctx, &Error{
 			statusCode: http.StatusInternalServerError,
 			Code:       ErrCodeSaveConfigFailed,

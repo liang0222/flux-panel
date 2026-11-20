@@ -67,6 +67,15 @@ CREATE TABLE IF NOT EXISTS node (
   udp_listen_addr VARCHAR(100) NOT NULL DEFAULT '[::]'
 );
 
+-- 节点上报批次的去重凭据，与流量计数在同一事务提交。
+CREATE TABLE IF NOT EXISTS flow_report_batch (
+  node_id INTEGER NOT NULL,
+  batch_id TEXT NOT NULL,
+  payload_sha256 TEXT NOT NULL,
+  received_at INTEGER NOT NULL,
+  PRIMARY KEY (node_id, batch_id)
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS speed_limit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name VARCHAR(100) NOT NULL,
@@ -86,6 +95,10 @@ CREATE TABLE IF NOT EXISTS statistics_flow (
   time VARCHAR(100) NOT NULL,
   created_time INTEGER NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_statistics_flow_user_id ON statistics_flow (user_id, id);
+CREATE INDEX IF NOT EXISTS idx_statistics_flow_user_created ON statistics_flow (user_id, created_time);
+CREATE INDEX IF NOT EXISTS idx_statistics_flow_created ON statistics_flow (created_time);
 
 CREATE TABLE IF NOT EXISTS tunnel (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,5 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.admin.mapper.StatisticsFlowMapper">
+    <delete id="deleteBefore">
+        DELETE FROM statistics_flow WHERE created_time &lt; #{cutoffMs}
+    </delete>
 
+    <insert id="insertHourlySnapshot">
+        INSERT INTO statistics_flow (user_id, flow, total_flow, time, created_time)
+        SELECT current.user_id,
+               CASE WHEN previous.total_flow BETWEEN 0 AND current.total_flow
+                    THEN current.total_flow - previous.total_flow
+                    ELSE current.total_flow END,
+               current.total_flow, #{label}, #{createdMs}
+        FROM (
+            SELECT id AS user_id,
+                   CASE WHEN MAX(0, in_flow) > 9223372036854775807 - MAX(0, out_flow)
+                        THEN 9223372036854775807
+                        ELSE MAX(0, in_flow) + MAX(0, out_flow) END AS total_flow
+            FROM user
+        ) current
+        LEFT JOIN statistics_flow previous ON previous.id = (
+            SELECT prior.id FROM statistics_flow prior
+            WHERE prior.user_id = current.user_id ORDER BY prior.id DESC LIMIT 1
+        )
+        WHERE NOT EXISTS (
+            SELECT 1 FROM statistics_flow sample
+            WHERE sample.user_id = current.user_id
+              AND sample.created_time >= #{hourStartMs} AND sample.created_time &lt; #{hourEndMs}
+        )
+    </insert>
 </mapper>

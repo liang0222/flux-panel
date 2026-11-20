@@ -4,76 +4,50 @@ import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { reinitializeBaseURL } from '@/api/network';
-import { 
-  getPanelAddresses, 
-  savePanelAddress, 
-  setCurrentPanelAddress, 
-  deletePanelAddress, 
-  validatePanelAddress,
+import { applyPanelAddresses } from '@/api/network';
+import {
+  getPanelAddresses, savePanelAddress, setCurrentPanelAddress, deletePanelAddress, normalizePanelAddress,
 } from '@/utils/panel';
-
-interface PanelAddress {
-  name: string;
-  address: string;   
-  inx: boolean;
-}
-
+import type { PanelAddress } from '@/utils/panel';
 
 export const SettingsPage = () => {
   const navigate = useNavigate();
   const [panelAddresses, setPanelAddresses] = useState<PanelAddress[]>([]);
   const [newName, setNewName] = useState('');
   const [newAddress, setNewAddress] = useState('');
+  const [busy, setBusy] = useState(true);
 
-
-  const setPanelAddressesFunc = (newAddress: PanelAddress[]) => {
-    setPanelAddresses(newAddress); 
-  }
-
-  // 加载面板地址列表
-  const loadPanelAddresses = async () => {
-    (window as any).setPanelAddresses = setPanelAddressesFunc
-    getPanelAddresses();
+  const updateAddresses = async (operation: () => Promise<PanelAddress[]>, success?: string) => {
+    setBusy(true);
+    try {
+      const addresses = await operation();
+      applyPanelAddresses(addresses);
+      setPanelAddresses(addresses);
+      if (success) toast.success(success);
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '面板设置服务暂不可用');
+      return false;
+    } finally {
+      setBusy(false);
+    }
   };
 
-  // 添加新面板地址
   const addPanelAddress = async () => {
-    if (!newName.trim() || !newAddress.trim()) {
-      toast.error('请输入名称和地址');
+    const name = newName.trim();
+    const address = normalizePanelAddress(newAddress);
+    if (!name || !address) {
+      toast.error('请输入名称及完整 HTTPS 地址，例如 https://panel.example.com');
       return;
     }
-
-    // 验证地址格式
-    if (!validatePanelAddress(newAddress.trim())) {
-      toast.error('地址格式不正确，请检查：\n• 必须是完整的URL格式\n• 必须以 http:// 或 https:// 开头\n• 支持域名、IPv4、IPv6 地址\n• 端口号范围：1-65535\n• 示例：http://192.168.1.100:3000');
-      return;
+    if (await updateAddresses(() => savePanelAddress(name, address), '添加成功')) {
+      setNewName('');
+      setNewAddress('');
     }
-    (window as any).setPanelAddresses = setPanelAddressesFunc
-    savePanelAddress(newName.trim(), newAddress.trim());
-    setNewName('');
-    setNewAddress('');
-    toast.success('添加成功');
   };
 
-  // 设置当前面板地址
-  const setCurrentPanel = async (name: string) => {
-    (window as any).setPanelAddresses = setPanelAddressesFunc
-    setCurrentPanelAddress(name);
-    reinitializeBaseURL();
-  };
-
-  // 删除面板地址
-  const handleDeletePanelAddress = async (name: string) => {
-    (window as any).setPanelAddresses = setPanelAddressesFunc
-    deletePanelAddress(name);
-    reinitializeBaseURL();
-    toast.success('删除成功');
-  };
-
-  // 页面加载时获取数据
   useEffect(() => {
-    loadPanelAddresses();
+    void updateAddresses(getPanelAddresses);
   }, []);
 
   return (
@@ -85,7 +59,8 @@ export const SettingsPage = () => {
             <Button
               isIconOnly
               variant="light"
-              onClick={() => navigate(-1)}
+              isDisabled={busy}
+              onClick={() => navigate('/', { replace: true })}
               className="text-gray-600 dark:text-gray-300"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -109,17 +84,19 @@ export const SettingsPage = () => {
                   <Input
                     label="名称"
                     placeholder="请输入面板名称"
+                    maxLength={100}
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                   />
                   <Input
                     label="地址"
-                    placeholder="http://192.168.1.100:3000"
+                    placeholder="https://panel.example.com"
+                    maxLength={2048}
                     value={newAddress}
                     onChange={(e) => setNewAddress(e.target.value)}
                   />
                 </div>
-                <Button color="primary" onClick={addPanelAddress}>
+                <Button color="primary" isDisabled={busy} onClick={addPanelAddress}>
                   添加
                 </Button>
               </div>
@@ -140,21 +117,22 @@ export const SettingsPage = () => {
                         <div className="flex-1">
                           <div className="flex items-center gap-2">
                             <span className="font-medium text-gray-900 dark:text-white">{panel.name}</span>
-                            {panel.inx && (
+                            {panel.inx && normalizePanelAddress(panel.address) && (
                               <span className="px-2 py-1 bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-300 text-xs rounded">
                                 当前
                               </span>
                             )}
                           </div>
-                          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{panel.address}</p>
+                          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{normalizePanelAddress(panel.address) ?? '旧地址不可用，请添加 HTTPS 地址并重新选择'}</p>
                         </div>
                         <div className="flex items-center gap-2">
-                          {!panel.inx && (
+                          {!panel.inx && normalizePanelAddress(panel.address) && (
                             <Button
                               size="sm"
                               color="primary"
                               variant="flat"
-                              onClick={() => setCurrentPanel(panel.name)}
+                              isDisabled={busy}
+                              onClick={() => updateAddresses(() => setCurrentPanelAddress(panel.name))}
                             >
                               设为当前
                             </Button>
@@ -163,7 +141,8 @@ export const SettingsPage = () => {
                             size="sm"
                             color="danger"
                             variant="light"
-                            onClick={() => handleDeletePanelAddress(panel.name)}
+                            isDisabled={busy}
+                            onClick={() => updateAddresses(() => deletePanelAddress(panel.name), '删除成功')}
                           >
                             删除
                           </Button>

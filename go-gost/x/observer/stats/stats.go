@@ -66,9 +66,10 @@ func (s *Stats) Get(kind stats.Kind) uint64 {
 	return 0
 }
 
-func (s *Stats) ResetTraffic(reportedInputBytes, reportedOutputBytes uint64) {
-	s.inputBytes.Store(reportedInputBytes)
-	s.outputBytes.Store(reportedOutputBytes)
+// DrainTraffic consumes accumulated byte increments without losing updates
+// made concurrently by connections.
+func (s *Stats) DrainTraffic() (input, output uint64) {
+	return s.inputBytes.Swap(0), s.outputBytes.Swap(0)
 }
 
 func (s *Stats) Reset() {

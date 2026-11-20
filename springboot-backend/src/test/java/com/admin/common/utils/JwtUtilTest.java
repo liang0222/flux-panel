@@ -12,6 +12,7 @@ import java.util.Base64;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -20,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class JwtUtilTest {
 
-    private static final String SECRET = "unit-test-secret-key";
+    private static final String SECRET = "fixture-only-unit-jwt-key-90f2c5b03a4520";
 
     @BeforeEach
     void setUp() {
@@ -49,6 +50,21 @@ class JwtUtilTest {
         assertTrue(JwtUtil.validateToken(token));
         assertEquals(2L, JwtUtil.getUserIdFromToken(token));
         assertEquals(0, JwtUtil.getRoleIdFromToken(token));
+    }
+
+    @Test
+    void bearerAndLegacyRawTokenUseTheSameValidatedClaims() {
+        String token = JwtUtil.generateToken(user());
+        assertTrue(JwtUtil.validateToken("Bearer " + token));
+        assertEquals(JwtUtil.getUserIdFromToken(token), JwtUtil.getUserIdFromToken("bearer " + token));
+        assertEquals(JwtUtil.getRoleIdFromToken(token), JwtUtil.getRoleIdFromToken("Bearer " + token));
+    }
+
+    @Test
+    void weakConfigurationFailsFast() {
+        JwtUtil weak = new JwtUtil();
+        ReflectionTestUtils.setField(weak, "secretKey", "short-fixture");
+        assertThrows(IllegalStateException.class, weak::init);
     }
 
     @Test

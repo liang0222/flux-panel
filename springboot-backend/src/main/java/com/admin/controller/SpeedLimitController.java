@@ -23,7 +23,6 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/api/v1/speed-limit")
-@CrossOrigin
 public class SpeedLimitController extends BaseController {
 
     @Autowired

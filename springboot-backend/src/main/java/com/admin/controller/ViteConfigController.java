@@ -17,7 +17,6 @@ import java.util.Map;
  * @since 2025-07-24
  */
 @RestController
-@CrossOrigin
 @RequestMapping("/api/v1/config")
 public class ViteConfigController extends BaseController {
 

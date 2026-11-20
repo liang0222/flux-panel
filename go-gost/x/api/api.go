@@ -7,6 +7,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/go-gost/core/auth"
+	xconfig "github.com/go-gost/x/config"
 )
 
 var (
@@ -23,6 +24,7 @@ type Options struct {
 	AccessLog  bool
 	PathPrefix string
 	Auther     auth.Authenticator
+	Reload     func() error
 }
 
 func Register(r *gin.Engine, opts *Options) {
@@ -52,12 +54,16 @@ func Register(r *gin.Engine, opts *Options) {
 	router.StaticFS("/docs", http.FS(swaggerDoc))
 
 	config := router.Group("/config")
-	config.Use(mwBasicAuth(opts.Auther))
+	config.Use(mwBasicAuth(opts.Auther), func(ctx *gin.Context) {
+		xconfig.RuntimeMu.Lock()
+		defer xconfig.RuntimeMu.Unlock()
+		ctx.Next()
+	})
 
 	config.GET("", getConfig)
 	config.POST("", saveConfig)
 
-	config.POST("/reload", reloadConfig)
+	config.POST("/reload", func(ctx *gin.Context) { reloadConfig(ctx, opts.Reload) })
 
 	config.POST("/services", createService)
 	config.PUT("/services/:service", updateService)

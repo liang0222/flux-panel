@@ -5,15 +5,18 @@ services:
     build:
       context: ../springboot-backend
     image: local/flux-panel-backend:2.0.7-beta
+    # SQLite 统计任务只允许单实例；同一数据卷不得再挂载给其他后端。
+    scale: 1
     container_name: springboot-backend
     restart: unless-stopped
     environment:
       DB_PATH: /app/data/gost.db
-      JWT_SECRET: ${JWT_SECRET:?请在 deploy/.env 中设置 JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:?请先在 .env 设置随机 JWT_SECRET（openssl rand -hex 32）}
+      PANEL_ALLOWED_ORIGINS: ${PANEL_ALLOWED_ORIGINS:-}
       LOG_DIR: /app/logs
       JAVA_OPTS: "-Xms64m -Xmx512m -XX:MaxMetaspaceSize=192m -XX:TrimNativeHeapInterval=15000 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
     ports:
-      - "${BACKEND_PORT:-6365}:6365"
+      - "${BACKEND_BIND_IP:-127.0.0.1}:${BACKEND_PORT:-6365}:6365"
     volumes:
       - backend_logs:/app/logs
       - sqlite_data:/app/data
@@ -39,7 +42,12 @@ services:
     container_name: vite-frontend
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-6366}:80"
+      - "${FRONTEND_BIND_IP:-127.0.0.1}:${FRONTEND_PORT:-6366}:80"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
     depends_on:
       backend:
         condition: service_healthy

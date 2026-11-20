@@ -1,58 +1,57 @@
 package port
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"time"
+
+	"github.com/go-gost/core/logger"
 )
 
-func ForceClosePortConnections(addr string) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Printf("⚠️ ForceClosePortConnections panic recovered: %v\n", r)
-			err = nil // 永远返回 nil
-		}
-	}()
-
-	if addr == "" {
-		fmt.Println("⚠️ 地址为空")
-		return nil
-	}
-
+func ForceClosePortConnections(serviceName, addr string) error {
 	_, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		fmt.Printf("⚠️ 地址解析失败: %v\n", err)
-		return nil
+		return fmt.Errorf("parse service address: %w", err)
 	}
-
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		fmt.Printf("⚠️ 端口非法: %v\n", err)
-		return nil
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid port %q", portStr)
 	}
 
-	cmd := exec.Command("tcpkill", "-i", "any", "port", fmt.Sprintf("%d", port))
+	log := logger.Default().WithFields(map[string]any{"service": serviceName, "port": port})
+	return startAndReap(exec.Command("tcpkill", "-i", "any", "port", strconv.Itoa(port)), 2*time.Second, log)
+}
+
+func startAndReap(cmd *exec.Cmd, duration time.Duration, log logger.Logger) error {
 	if err := cmd.Start(); err != nil {
-		fmt.Printf("⚠️ 启动 tcpkill 失败: %v\n", err)
-		return nil
+		return fmt.Errorf("start tcpkill: %w", err)
 	}
 
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Printf("⚠️ tcpkill goroutine panic recovered: %v\n", r)
+		var timeout sync.WaitGroup
+		timeout.Add(1)
+		killed := false
+		timer := time.AfterFunc(duration, func() {
+			defer timeout.Done()
+			if err := cmd.Process.Kill(); err == nil {
+				killed = true
+			} else if !errors.Is(err, os.ErrProcessDone) {
+				log.Warnf("stop tcpkill: %v", err)
 			}
-		}()
-		time.Sleep(2 * time.Second)
-		if cmd.Process != nil {
-			if err := cmd.Process.Kill(); err != nil {
-				fmt.Printf("⚠️ 终止 tcpkill 失败: %v\n", err)
-			}
+		})
+		err := cmd.Wait()
+		if timer.Stop() {
+			timeout.Done()
+		}
+		timeout.Wait()
+		if err != nil && !killed {
+			log.Warnf("wait tcpkill: %v", err)
 		}
 	}()
-
-	fmt.Printf("✅ 正在断开端口 %d 上的所有连接...\n", port)
 	return nil
 }

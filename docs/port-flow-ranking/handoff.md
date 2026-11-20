@@ -1,9 +1,17 @@
 # 交接说明：端口转发流量排行榜（flux-panel v2.0.7-beta）
 
 > 给下一个会话看的进度快照。读完这一页即可继续，不需要回看原对话。
-> 最后更新：2026-10-21 15:35（Asia/Shanghai）
+> 当前整改于 2026-11-20 更新。下方历史发布记录保留原时间与状态。
 
-## 一句话现状
+## 当前整改分支
+
+- 工作区 `/root/v2.0.7-beta`，分支 `fix/transport-ctx-cancel`，审计基线 `c18b6142`。本轮整改代码与历史排行功能发布记录分开管理。
+- 后端维持 SQLite 单实例部署。历史排行继续保留已删除转发的采集记录，按 31 天保留期清理。小时级用户统计另有 48 小时保留期。
+- 面板先升级，节点随后滚动升级。旧节点仍走兼容上报路径，新节点上报通过 `X-Flow-Batch-Id` 识别重复投递。升级与备份步骤见 [部署说明](deploy-and-publish.md)。
+- 本轮 Web 资源和移动壳需配套打包。移动端面板地址要求 HTTPS，iOS 的跨域配置与设备验证见部署说明。
+- P2 与 §4 风险的逐项结果见 [审计整改验收](audit-remediation.md)。隔离 Maven 131 项、Go 两模块测试/竞态/构建、Web 与移动资源构建、Chromium 冒烟及 17 项安装器测试通过。改动仍在工作区，实际容器与 systemd 升级、移动签名包及真机 HTTPS/WSS 链路待验。
+
+## 历史发布现状
 
 两期功能都已实现并验证：**端口流量排行** + **仪表盘实时速率**（66 个后端测试、前端构建、真实 Docker 部署与页面渲染截图）。代码已提交并推送到 **GitHub `liang0222/flux-panel`**（`feat/port-traffic-ranking` 分支头），镜像已推送到 **Docker Hub `ahmadplayz721`**（`2.0.7-beta` / `latest`，amd64+arm64，已拉取核对镜像内确含新代码）；2026-10-25 做过一轮全面代码审查（`code-review.md`），无阻断缺陷。剩余工作只有服务器部署、合并到 `main` 时改安装 URL、可选的体验补充和上线观察。
 
@@ -213,18 +221,22 @@ cd /root/v2.0.7-beta/vite-frontend && npm run build
 ## 自测步骤（3 分钟复现核心结论）
 
 ```bash
-# 1. 全量测试
-export JAVA_HOME=/opt/tools/jdk21 PATH=/opt/tools/jdk21/bin:/opt/tools/maven/bin:$PATH
-cd /root/v2.0.7-beta/springboot-backend && mvn -B test
+# 1. 使用 Java 21 和 Maven 运行测试并打包
+cd /root/v2.0.7-beta/springboot-backend
+mvn -B verify
 
-# 2. 起服务（临时库）
-mkdir -p /tmp/smoke/logs
-DB_PATH=/tmp/smoke/gost.db JWT_SECRET=smoke-secret LOG_DIR=/tmp/smoke/logs \
-  java -Duser.timezone=Asia/Shanghai -jar target/admin-0.0.1-SNAPSHOT.jar > /tmp/smoke/server.log 2>&1 &
+# 2. 起隔离服务（独立端口、临时库、一次性随机密钥）
+smoke_dir=$(mktemp -d)
+mkdir -p "$smoke_dir/logs"
+smoke_key=$(openssl rand -hex 32)
+DB_PATH="$smoke_dir/gost.db" JWT_SECRET="$smoke_key" LOG_DIR="$smoke_dir/logs" \
+  java -Duser.timezone=Asia/Shanghai -jar target/admin-0.0.1-SNAPSHOT.jar \
+  --server.address=127.0.0.1 --server.port=16365 > "$smoke_dir/server.log" 2>&1 &
+smoke_pid=$!
 
-# 3. 用 python3 sqlite3 造 forward / forward_port / tunnel 与计数器（见 lessons.md 的冒烟配方）
+# 3. 用 python3 sqlite3 在临时库准备 forward / forward_port / tunnel 与计数器
 # 4. 等下一个 5 分钟边界，查表确认基线与增量
-# 5. curl 接口（Python 复刻 JWT，secret=smoke-secret）
+# 5. 从本地面板正常登录后验证接口，结束时 kill "$smoke_pid"
 #    排行：POST /api/v1/forward-flow/ranking  {"range":"today"}
 #    实时：POST /api/v1/flow-rate/current（管理员 scope=all，普通用户 scope=self）
 ```

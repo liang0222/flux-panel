@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-gost/core/admission"
@@ -43,43 +44,22 @@ type options struct {
 	logger         logger.Logger
 }
 
-var isTls = 0
+type protocolBlock struct{ http, tls, socks int }
 
-var isHttp = 0
+var protocolSwitches atomic.Pointer[protocolBlock]
 
-var isSocks = 0
+func ProtocolBlock() (http, tls, socks int) {
+	if p := protocolSwitches.Load(); p != nil {
+		return p.http, p.tls, p.socks
+	}
+	return 0, 0, 0
+}
 
-var needWrap = false
-
-// SetProtocolBlock sets protocol blocking switches and recomputes wrapper need
-func SetProtocolBlock(httpOn int, tlsOn int, socksOn int) {
-    isHttp = httpOn
-    isTls = tlsOn
-    isSocks = socksOn
-    needWrap = isTls+isSocks+isHttp > 0
+func SetProtocolBlock(httpOn, tlsOn, socksOn int) {
+	protocolSwitches.Store(&protocolBlock{httpOn, tlsOn, socksOn})
 }
 
 type Option func(opts *options)
-
-func init() {
-	// 本 init 只做一件事：在包加载时尝试读取工作目录下的 config.json，
-	// 用来初始化 isTls / isSocks / isHttp 三个协议包装开关。
-	//
-	// 原实现在读取失败时调用 log.Fatal，等价于 os.Exit(1)。这会让任何导入本包
-	// 且在"当前工作目录没有 config.json"的环境下运行的程序直接退出 —— 不仅包括
-	// 所有单元测试，也包括任何把本包当库引用的场景（本包此前因此完全无法被测试）。
-	//
-	// 真正的配置加载与校验在 main() 中完成，那里失败同样会报错并退出，所以这里
-	// 没有理由让进程终止：读不到就保留默认值 0（不包装协议），把决定权交回调用方。
-	//
-	// 生产环境的 systemd WorkingDirectory=/etc/flux_agent 下始终存在 config.json，
-	// 成功路径的行为（打印标记 + 设置 needWrap）与原实现完全一致。
-	if _, err := LoadConfig("config.json"); err != nil {
-		return
-	}
-	fmt.Println("config.json loaded")
-	needWrap = isTls+isSocks+isHttp > 0
-}
 
 func AdmissionOption(admission admission.Admission) Option {
 	return func(opts *options) {
@@ -142,11 +122,14 @@ func LoggerOption(logger logger.Logger) Option {
 }
 
 type defaultService struct {
-	name     string
-	listener listener.Listener
-	handler  handler.Handler
-	status   *Status
-	options  options
+	name      string
+	listener  listener.Listener
+	handler   handler.Handler
+	status    *Status
+	options   options
+	done      chan struct{}
+	closed    atomic.Bool
+	trafficMu sync.Mutex
 }
 
 func NewService(name string, ln listener.Listener, h handler.Handler, opts ...Option) service.Service {
@@ -159,6 +142,7 @@ func NewService(name string, ln listener.Listener, h handler.Handler, opts ...Op
 		listener: ln,
 		handler:  h,
 		options:  options,
+		done:     make(chan struct{}),
 		status: &Status{
 			createTime: time.Now(),
 			events:     make([]Event, 0, MaxEventSize),
@@ -176,7 +160,10 @@ func (s *defaultService) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
+func (s *defaultService) Done() <-chan struct{} { return s.done }
+
 func (s *defaultService) Serve() error {
+	defer close(s.done)
 
 	s.execCmds("post-up", s.options.postUp)
 	s.setState(StateReady)
@@ -187,8 +174,11 @@ func (s *defaultService) Serve() error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	if s.status.Stats() != nil {
-		go s.observeStats(ctx)
+	observerDone := make(chan struct{})
+	if s.options.observer != nil && s.status.Stats() != nil {
+		go func() { defer close(observerDone); s.observeStats(ctx) }()
+	} else {
+		close(observerDone)
 	}
 
 	if v := xmetrics.GetGauge(
@@ -213,6 +203,13 @@ func (s *defaultService) Serve() error {
 	defer func() {
 		cancel()
 		wg.Wait()
+		if s.options.observer != nil {
+			if st, ok := s.status.Stats().(*xstats.Stats); ok {
+				s.drainTraffic(st)
+			}
+		}
+		// Observation uses the same context, but a plugin may take time to stop.
+		<-observerDone
 	}()
 
 	var tempDelay time.Duration
@@ -310,7 +307,7 @@ func (s *defaultService) Serve() error {
 				}()
 			}
 
-			if needWrap {
+			if h, t, s := ProtocolBlock(); h+t+s > 0 {
 				conn = wrapConnPDetection(conn)
 			}
 
@@ -332,6 +329,8 @@ func (s *defaultService) Status() *Status {
 	return s.status
 }
 
+func (s *defaultService) IsClosed() bool { return s.closed.Load() }
+
 func (s *defaultService) Close() error {
 	s.execCmds("pre-down", s.options.preDown)
 	defer s.execCmds("post-down", s.options.postDown)
@@ -339,7 +338,11 @@ func (s *defaultService) Close() error {
 	if closer, ok := s.handler.(io.Closer); ok {
 		closer.Close()
 	}
-	return s.listener.Close()
+	err := s.listener.Close()
+	if err == nil || errors.Is(err, net.ErrClosed) {
+		s.closed.Store(true)
+	}
+	return err
 }
 
 func (s *defaultService) execCmds(phase string, cmds []string) {
@@ -373,6 +376,18 @@ func (s *defaultService) setState(state State) {
 			Msg:     msg,
 		}})
 	}
+}
+
+func (s *defaultService) drainTraffic(st *xstats.Stats) (input, output uint64) {
+	// Serialize the counter drain and manager enqueue so Done implies all
+	// enqueued increments are visible to the final report.
+	s.trafficMu.Lock()
+	defer s.trafficMu.Unlock()
+	input, output = st.DrainTraffic()
+	if input != 0 || output != 0 {
+		GetGlobalTrafficManager().AddTraffic(s.name, int64(output), int64(input))
+	}
+	return
 }
 
 func (s *defaultService) observeStats(ctx context.Context) {
@@ -414,29 +429,14 @@ func (s *defaultService) observeStats(ctx context.Context) {
 			if isUpdated {
 				inputBytes := st.Get(stats.KindInputBytes)
 				outputBytes := st.Get(stats.KindOutputBytes)
-
-				evs := []observer.Event{
-					xstats.StatsEvent{
-						Kind:         "service",
-						Service:      s.name,
-						TotalConns:   st.Get(stats.KindTotalConns),
-						CurrentConns: st.Get(stats.KindCurrentConns),
-						InputBytes:   inputBytes,
-						OutputBytes:  outputBytes,
-						TotalErrs:    st.Get(stats.KindTotalErrs),
-					},
+				if concrete, ok := st.(*xstats.Stats); ok {
+					inputBytes, outputBytes = s.drainTraffic(concrete)
 				}
-				
-				// 将流量累积到全局管理器，而不是立即上报
-				if outputBytes > 0 || inputBytes > 0 {
-					globalManager := GetGlobalTrafficManager()
-					globalManager.AddTraffic(s.name, int64(outputBytes), int64(inputBytes))
-					
-					// 立即重置流量计数（因为已经记录到全局管理器中）
-					if xstats, ok := st.(*xstats.Stats); ok {
-						xstats.ResetTraffic(st.Get(stats.KindInputBytes)-inputBytes, st.Get(stats.KindOutputBytes)-outputBytes)
-					}
-				}
+				evs := []observer.Event{xstats.StatsEvent{
+					Kind: "service", Service: s.name,
+					TotalConns: st.Get(stats.KindTotalConns), CurrentConns: st.Get(stats.KindCurrentConns),
+					InputBytes: inputBytes, OutputBytes: outputBytes, TotalErrs: st.Get(stats.KindTotalErrs),
+				}}
 
 				if err := s.options.observer.Observe(ctx, evs); err != nil {
 					fmt.Printf("发送观察器事件失败: %v", err)
@@ -491,17 +491,18 @@ func detectProtocol(data []byte, conn net.Conn) (blocked bool) {
 		return false
 	}
 
-	if isHttp == 1 && detectHTTP(data) {
+	httpOn, tlsOn, socksOn := ProtocolBlock()
+	if httpOn == 1 && detectHTTP(data) {
 		conn.Close()
 		return true
 	}
 
-	if isTls == 1 && detectTLS(data) {
+	if tlsOn == 1 && detectTLS(data) {
 		conn.Close()
 		return true
 	}
 
-	if isSocks == 1 && detectSOCKS(data) {
+	if socksOn == 1 && detectSOCKS(data) {
 		conn.Close()
 		return true
 	}
@@ -605,9 +606,7 @@ func LoadConfig(configPath string) (string, error) {
 		return "", fmt.Errorf("解析配置文件失败: %v", err)
 	}
 
-	isTls = config.Tls
-	isSocks = config.Socks
-	isHttp = config.Http
+	SetProtocolBlock(config.Http, config.Tls, config.Socks)
 
 	return "", nil
 

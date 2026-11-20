@@ -3,8 +3,8 @@ package com.admin.common.utils;
 import com.admin.common.dto.GostDto;
 import com.admin.entity.ChainTunnel;
 import com.admin.entity.Node;
-import com.alibaba.fastjson.JSONArray;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

@@ -6,7 +6,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.springframework.web.filter.CorsFilter;
-import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -16,28 +15,18 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @EnableWebMvc
 public class WebMvcConfig implements WebMvcConfigurer {
 
-    private CorsConfiguration buildConfig() {
-        CorsConfiguration corsConfiguration = new CorsConfiguration();
-        corsConfiguration.addAllowedOrigin("*");
-        corsConfiguration.addAllowedHeader("*");
-        corsConfiguration.addAllowedMethod("*");
-        corsConfiguration.addExposedHeader("Authorization");
-        return corsConfiguration;
-    }
-
     @Bean
-    public CorsFilter corsFilter() {
+    public CorsFilter corsFilter(PanelOriginPolicy originPolicy) {
+        CorsConfiguration config = new CorsConfiguration();
+        config.setAllowedOrigins(originPolicy.allowedOrigins());
+        config.addAllowedHeader("*");
+        config.addAllowedMethod("*");
+        config.addExposedHeader("Authorization");
+        config.setAllowCredentials(false);
+        config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", buildConfig());
+        source.registerCorsConfiguration("/**", config);
         return new CorsFilter(source);
-    }
-
-    @Override
-    public void addCorsMappings(CorsRegistry registry) {
-        registry.addMapping("/**")
-                .allowedOrigins("*")
-                .allowedMethods("GET", "POST", "DELETE", "PUT")
-                .maxAge(3600);
     }
 
     /**

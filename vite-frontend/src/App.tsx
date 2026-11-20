@@ -1,4 +1,4 @@
-import { Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { Suspense, lazy, useEffect, useState } from "react";
 
 import IndexPage from "@/pages/index";
@@ -25,6 +25,7 @@ import H5Layout from "@/layouts/h5";
 import H5SimpleLayout from "@/layouts/h5-simple";
 
 import { isLoggedIn } from "@/utils/auth";
+import { isWebViewFunc } from "@/utils/panel";
 import { siteConfig } from "@/config/site";
 
 // 检测是否为H5模式
@@ -249,7 +250,7 @@ function App() {
       />
       <Route 
         path="/settings" 
-        element={<LazyPage><SettingsPage /></LazyPage>}
+        element={isWebViewFunc() ? <LazyPage><SettingsPage /></LazyPage> : <Navigate to="/" replace />}
       />
     </Routes>
   );

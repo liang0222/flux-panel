@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-gost/core/logger"
 	"github.com/go-gost/core/service"
 	"github.com/go-gost/x/config"
 	parser "github.com/go-gost/x/config/parsing/service"
@@ -279,7 +280,9 @@ func pauseServices(req pauseServicesRequest) error {
 
 		// 强制断开端口的所有连接
 		if serviceConfig.Addr != "" {
-			_ = kill.ForceClosePortConnections(serviceConfig.Addr)
+			if err := kill.ForceClosePortConnections(stp.name, serviceConfig.Addr); err != nil {
+				logger.Default().WithFields(map[string]any{"service": stp.name, "addr": serviceConfig.Addr}).Warn(err)
+			}
 		}
 
 		// 记录已暂停的服务

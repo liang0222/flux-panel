@@ -1,25 +1,21 @@
 package socket
 
 import (
-	"os"
+	"io"
+	"path/filepath"
+	"strings"
 
 	"github.com/go-gost/x/config"
 )
 
-func saveConfig() {
-
-	file := "gost.json"
-
-	f, err := os.Create(file)
-	if err != nil {
-		return
+func saveConfig(path string) error {
+	format := strings.ToLower(filepath.Ext(path))
+	if format == ".yml" || format == ".yaml" {
+		format = "yaml"
+	} else {
+		format = "json"
 	}
-	defer f.Close()
-
-	if err := config.Global().Write(f, "json"); err != nil {
-
-		return
-	}
-
-	return
+	return config.OnUpdate(func(cfg *config.Config) error {
+		return config.WriteFileAtomic(path, func(w io.Writer) error { return cfg.Write(w, format) })
+	})
 }

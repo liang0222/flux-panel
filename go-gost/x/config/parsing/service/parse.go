@@ -1,7 +1,9 @@
 package service
 
 import (
+	"crypto/tls"
 	"fmt"
+	"io"
 	"runtime"
 	"strings"
 	"time"
@@ -27,7 +29,6 @@ import (
 	auth_parser "github.com/go-gost/x/config/parsing/auth"
 	bypass_parser "github.com/go-gost/x/config/parsing/bypass"
 	hop_parser "github.com/go-gost/x/config/parsing/hop"
-	logger_parser "github.com/go-gost/x/config/parsing/logger"
 	selector_parser "github.com/go-gost/x/config/parsing/selector"
 	tls_util "github.com/go-gost/x/internal/util/tls"
 	cache_limiter "github.com/go-gost/x/limiter/traffic/cache"
@@ -40,6 +41,11 @@ import (
 )
 
 func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
+	return ParseServiceWithDefaults(cfg, logger.Default(), parsing.DefaultTLSConfig(), registry.LoggerRegistry().Get)
+}
+
+// ParseServiceWithDefaults constructs a service against staged default values.
+func ParseServiceWithDefaults(cfg *config.ServiceConfig, log logger.Logger, defaultTLS *tls.Config, getLogger func(string) logger.Logger) (_ service.Service, err error) {
 	if cfg.Listener == nil {
 		cfg.Listener = &config.ListenerConfig{}
 	}
@@ -54,8 +60,13 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		cfg.Handler.Type = "auto"
 	}
 
-	log := logger.Default()
-	if loggers := logger_parser.List(cfg.Logger, cfg.Loggers...); len(loggers) > 0 {
+	var loggers []logger.Logger
+	for _, name := range append([]string{cfg.Logger}, cfg.Loggers...) {
+		if lg := getLogger(name); lg != nil {
+			loggers = append(loggers, lg)
+		}
+	}
+	if len(loggers) > 0 {
 		log = logger.LoggerGroup(loggers...)
 	}
 
@@ -76,7 +87,7 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		return nil, err
 	}
 	if tlsConfig == nil {
-		tlsConfig = parsing.DefaultTLSConfig().Clone()
+		tlsConfig = defaultTLS.Clone()
 		tls_util.SetTLSOptions(tlsConfig, tlsCfg.Options)
 	}
 
@@ -246,6 +257,11 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		listenerLogger.Error("init: ", err)
 		return nil, err
 	}
+	defer func() {
+		if err != nil {
+			ln.Close()
+		}
+	}()
 
 	handlerLogger := serviceLogger.WithFields(map[string]any{
 		"kind": "handler",
@@ -261,7 +277,7 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		return nil, err
 	}
 	if tlsConfig == nil {
-		tlsConfig = parsing.DefaultTLSConfig().Clone()
+		tlsConfig = defaultTLS.Clone()
 		tls_util.SetTLSOptions(tlsConfig, tlsCfg.Options)
 	}
 
@@ -330,6 +346,13 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		return nil, fmt.Errorf("unknown handler: %s", cfg.Handler.Type)
 	}
 
+	defer func() {
+		if err != nil {
+			if closer, ok := h.(io.Closer); ok {
+				closer.Close()
+			}
+		}
+	}()
 	if forwarder, ok := h.(handler.Forwarder); ok {
 		hop, err := parseForwarder(cfg.Forwarder, log)
 		if err != nil {

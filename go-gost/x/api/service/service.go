@@ -3,6 +3,7 @@ package service
 import (
 	"net"
 	"net/http"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-gost/core/auth"
@@ -14,6 +15,7 @@ type options struct {
 	accessLog  bool
 	pathPrefix string
 	auther     auth.Authenticator
+	reload     func() error
 }
 
 type Option func(*options)
@@ -37,9 +39,16 @@ func AutherOption(auther auth.Authenticator) Option {
 }
 
 type server struct {
-	s      *http.Server
-	ln     net.Listener
-	cclose chan struct{}
+	s         *http.Server
+	ln        net.Listener
+	cclose    chan struct{}
+	closeOnce sync.Once
+}
+
+var ginModeOnce sync.Once
+
+func ReloadOption(reload func() error) Option {
+	return func(o *options) { o.reload = reload }
 }
 
 func NewService(network, addr string, opts ...Option) (service.Service, error) {
@@ -56,13 +65,14 @@ func NewService(network, addr string, opts ...Option) (service.Service, error) {
 		opt(&options)
 	}
 
-	gin.SetMode(gin.ReleaseMode)
+	ginModeOnce.Do(func() { gin.SetMode(gin.ReleaseMode) })
 
 	r := gin.New()
 	api.Register(r, &api.Options{
 		AccessLog:  options.accessLog,
 		PathPrefix: options.pathPrefix,
 		Auther:     options.auther,
+		Reload:     options.reload,
 	})
 
 	return &server{
@@ -83,7 +93,13 @@ func (s *server) Addr() net.Addr {
 }
 
 func (s *server) Close() error {
-	return s.s.Close()
+	var err error
+	s.closeOnce.Do(func() {
+		close(s.cclose)
+		err = s.s.Close()
+		s.ln.Close() // Serve might not have started yet.
+	})
+	return err
 }
 
 func (s *server) IsClosed() bool {

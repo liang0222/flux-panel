@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-gost/core/logger"
 	"github.com/go-gost/core/service"
 	"github.com/go-gost/x/config"
 	parser "github.com/go-gost/x/config/parsing/service"
@@ -549,7 +550,9 @@ func pauseService(ctx *gin.Context) {
 
 	// 强制断开端口的所有连接
 	if serviceAddr != "" {
-		_ = kill.ForceClosePortConnections(serviceAddr)
+		if err := kill.ForceClosePortConnections(name, serviceAddr); err != nil {
+			logger.Default().WithFields(map[string]any{"service": name, "addr": serviceAddr}).Warn(err)
+		}
 	}
 
 	// 更新配置中的暂停状态
@@ -910,7 +913,9 @@ func pauseServices(ctx *gin.Context) {
 
 		// 强制断开端口的所有连接
 		if serviceConfig.Addr != "" {
-			_ = kill.ForceClosePortConnections(serviceConfig.Addr)
+			if err := kill.ForceClosePortConnections(stp.name, serviceConfig.Addr); err != nil {
+				logger.Default().WithFields(map[string]any{"service": stp.name, "addr": serviceConfig.Addr}).Warn(err)
+			}
 		}
 
 		// 记录已暂停的服务

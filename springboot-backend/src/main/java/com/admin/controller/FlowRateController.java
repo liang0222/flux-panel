@@ -3,7 +3,6 @@ package com.admin.controller;
 import com.admin.common.lang.R;
 import com.admin.common.utils.JwtUtil;
 import com.admin.service.FlowRateService;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -19,7 +18,6 @@ import javax.annotation.Resource;
  * @since 2.0.7-beta
  */
 @RestController
-@CrossOrigin
 @RequestMapping("/api/v1/flow-rate")
 public class FlowRateController extends BaseController {
 

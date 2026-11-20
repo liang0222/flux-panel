@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:mobile": "tsc && vite build --mode mobile",
     "lint": "eslint --fix",
     "preview": "vite preview"
   },

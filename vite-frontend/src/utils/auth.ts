@@ -1,4 +1,42 @@
 import { getRoleIdFromToken, isTokenValid } from './jwt';
+import { iosSessionRequest } from './panel';
+
+type Session = Record<'token' | 'role_id' | 'name' | 'admin', string>;
+const sessionKeys = ['token', 'role_id', 'name', 'admin'] as const;
+const panelKey = 'session_panel';
+
+function writeSession(session: Session, panel?: string) {
+  if (panel) localStorage.setItem(panelKey, panel);
+  for (const key of sessionKeys) localStorage.setItem(key, session[key]);
+}
+
+function clearLocalSession() {
+  for (const key of sessionKeys) localStorage.removeItem(key);
+  localStorage.removeItem(panelKey);
+}
+
+export function bindLocalSession(panel?: string) {
+  if (!panel || localStorage.getItem(panelKey) !== panel) clearLocalSession();
+}
+
+export async function restoreSession(panel: string) {
+  const reply = await iosSessionRequest('load', panel);
+  if (!reply) return; // Android uses the origin's bound local session.
+  clearLocalSession();
+  if (reply.ok && reply.session && isTokenValid(reply.session.token)) writeSession(reply.session, panel);
+}
+
+export async function saveSession(session: Session, panel?: string, isCurrent = () => true) {
+  const reply = panel ? await iosSessionRequest('save', panel, session) : undefined;
+  if (reply?.ok === false) throw new Error('登录信息保存失败');
+  if (!isCurrent()) throw new Error('面板已切换，请重新登录');
+  writeSession(session, panel);
+}
+
+export function clearSession() {
+  clearLocalSession();
+  void iosSessionRequest('clear').catch(() => { /* WebView is closing. */ });
+}
 
 /**
  * 权限工具类
