@@ -2,7 +2,7 @@
 # 在面板自己的 Compose 目录运行，使用 Compose v2/v5、Python 3 和 OpenSSL。
 # 优先使用邻接模板；内置同版本模板允许单文件分发。所有来源均校验固定摘要。
 COMPOSE_REPO=liang0222/flux-panel
-COMPOSE_REF=${FLUX_COMPOSE_REF:-refs/tags/2.0.7-beta-perf}
+COMPOSE_REF=${FLUX_COMPOSE_REF:-refs/tags/2.0.7-beta-r1}
 PANEL_HEALTH_TIMEOUT=${FLUX_PANEL_HEALTH_TIMEOUT:-270}
 
 panel_error() { echo "❌ $*" >&2; return 1; }
@@ -70,7 +70,7 @@ sys.stdout.write(text)
 ' "$variant" <<'FLUX_COMPOSE_TEMPLATE'
 services:
   backend:
-    image: ${FLUX_BACKEND_IMAGE:-ahmadplayz721/flux-panel-backend:2.0.7-beta}
+    image: ${FLUX_BACKEND_IMAGE:-ahmadplayz721/flux-panel-backend:2.0.7-beta-r1}
     # SQLite 统计任务只允许单实例；同一数据卷不得再挂载给其他后端。
     scale: 1
     container_name: springboot-backend
@@ -109,7 +109,7 @@ services:
       start_period: 60s
 
   frontend:
-    image: ${FLUX_FRONTEND_IMAGE:-ahmadplayz721/flux-panel-frontend:2.0.7-beta}
+    image: ${FLUX_FRONTEND_IMAGE:-ahmadplayz721/flux-panel-frontend:2.0.7-beta-r1}
     container_name: vite-frontend
     restart: unless-stopped
     ports:
@@ -153,9 +153,9 @@ FLUX_COMPOSE_TEMPLATE
 panel_download_compose() {
   local file="$1" variant="$2" name="docker-compose-$2.yml" expected actual url mirror script_dir
   if [[ $variant == v4 ]]; then
-    expected=${FLUX_COMPOSE_SHA256_V4:-b253e091bc9acf0f2824b14efa57678a6d74df7b4187f43c1932eee06f8839f8}
+    expected=${FLUX_COMPOSE_SHA256_V4:-1c7c1c1c8153b85f51a4083711d698ca8d9432de253062ea3486148a14280712}
   else
-    expected=${FLUX_COMPOSE_SHA256_V6:-ee7334ef788ed3a6d45e4496a39f8c5bf40bcfca0c63ce1de4e5d5a543b971c5}
+    expected=${FLUX_COMPOSE_SHA256_V6:-2cd93ffcc78af1ea2660e7eda4579a943bee31c720f8caa1a9253f45acb9f86e}
   fi
   [[ $expected =~ ^[0-9a-f]{64}$ && $COMPOSE_REF =~ ^[A-Za-z0-9._/-]+$ ]] ||
     { panel_error 'Compose ref 或 SHA-256 无效。'; return 1; }

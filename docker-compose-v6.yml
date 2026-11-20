@@ -1,6 +1,6 @@
 services:
   backend:
-    image: ${FLUX_BACKEND_IMAGE:-ahmadplayz721/flux-panel-backend:2.0.7-beta}
+    image: ${FLUX_BACKEND_IMAGE:-ahmadplayz721/flux-panel-backend:2.0.7-beta-r1}
     # SQLite 统计任务只允许单实例；同一数据卷不得再挂载给其他后端。
     scale: 1
     container_name: springboot-backend
@@ -40,7 +40,7 @@ services:
       start_period: 60s
 
   frontend:
-    image: ${FLUX_FRONTEND_IMAGE:-ahmadplayz721/flux-panel-frontend:2.0.7-beta}
+    image: ${FLUX_FRONTEND_IMAGE:-ahmadplayz721/flux-panel-frontend:2.0.7-beta-r1}
     container_name: vite-frontend
     restart: unless-stopped
     ports:

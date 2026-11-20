@@ -1,10 +1,8 @@
 #!/bin/bash
 
-# 摘要来自相应 GitHub Release 资产元数据，固定在脚本内；镜像站只负责传输。
+# 发布任务会用构建产物核对脚本内固定的 SHA-256；镜像站只负责传输。
 AGENT_REPO="liang0222/flux-panel"
-AGENT_RELEASE_TAG="2.0.7-beta-perf"
-UPSTREAM_REPO="bqlpfy/flux-panel"
-UPSTREAM_RELEASE_TAG="2.0.7-beta"
+AGENT_RELEASE_TAG="2.0.7-beta-r1"
 INSTALL_DIR="/etc/flux_agent"
 SERVICE_DIR="/etc/systemd/system"
 MEM_LIMIT="${FLUX_AGENT_MEMLIMIT:-512MiB}"
@@ -26,48 +24,33 @@ sha256_of() {
 }
 
 download_agent() {
-  local dest="$1" arch primary upstream base expected actual url index
+  local dest="$1" arch expected base source actual url
   arch=$(get_architecture) || return 1
   case "$arch" in
-    amd64)
-      primary=e7fa5ef2e8ce17dac333d16895e5463d3be784fd9411d1649097040a7a918da7
-      upstream=cf76a81f0952a91f1013a8a8b425380444895e5460407cb6e1d89d54f7f323e4 ;;
-    arm64)
-      primary=1c364276517d26d84fe64355f8133db5f6ab89a634028ed31caf6fa55f658602
-      upstream=a63b3141e5da5c4d2b800a18d3deeab7290b1d5ee6c45c3b1a30d8d0437d3704 ;;
+    amd64) expected=7906f62bb387b6d7db3f73213271499185376172b03a96be7b63e18598c50d84 ;;
+    arm64) expected=122e3bea871705cc9a72475b6d46f3e97df2f39af2372dccd748793dec59b490 ;;
   esac
-  if [[ -n ${FLUX_AGENT_SHA256:-} ]]; then
-    [[ $FLUX_AGENT_SHA256 =~ ^[0-9a-f]{64}$ ]] || {
-      echo "❌ FLUX_AGENT_SHA256 必须是独立核验的 64 位小写十六进制摘要。" >&2; return 1;
-    }
-    primary=$FLUX_AGENT_SHA256
-  fi
+  expected=${FLUX_AGENT_SHA256:-$expected}
+  [[ $expected =~ ^[0-9a-f]{64}$ ]] || {
+    echo "❌ FLUX_AGENT_SHA256 必须是独立核验的 64 位小写十六进制摘要。" >&2; return 1;
+  }
   base="${FLUX_AGENT_RELEASE_BASE:-https://github.com/${AGENT_REPO}/releases/download}"
-  local -a urls=("${base%/}/${AGENT_RELEASE_TAG}/gost-$arch"
-                 "https://github.com/${UPSTREAM_REPO}/releases/download/${UPSTREAM_RELEASE_TAG}/gost-$arch")
-  for index in 0 1; do
-    expected=$primary
-    if [[ $index == 1 ]]; then
-      expected=$upstream
-      # 自定义发布资产的运营方选择了另一份产物，失败时保留现有版本。
-      [[ -z ${FLUX_AGENT_SHA256:-} ]] || break
-    fi
-    local -a sources=("${urls[index]}")
-    if [[ ${urls[index]} == https://github.com/* ]]; then
-      sources+=("https://ghfast.top/${urls[index]}")
-    fi
-    for url in "${sources[@]}"; do
-      rm -f -- "$dest" || return 1
-      if curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 12 --max-time 300 \
-          -o "$dest" -- "$url" 2>/dev/null && [[ -s "$dest" ]]; then
-        actual=$(sha256_of "$dest") || return 1
-        if [[ $actual == "$expected" ]]; then
-          echo "✅ 节点二进制 SHA-256 校验通过。"
-          return 0
-        fi
-        echo "⚠️ 节点二进制摘要不匹配，跳过该下载源。" >&2
+  source="${base%/}/${AGENT_RELEASE_TAG}/gost-$arch"
+  local -a sources=("$source")
+  if [[ $source == https://github.com/* ]]; then
+    sources+=("https://ghfast.top/$source")
+  fi
+  for url in "${sources[@]}"; do
+    rm -f -- "$dest" || return 1
+    if curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 12 --max-time 300 \
+        -o "$dest" -- "$url" 2>/dev/null && [[ -s "$dest" ]]; then
+      actual=$(sha256_of "$dest") || return 1
+      if [[ $actual == "$expected" ]]; then
+        echo "✅ 节点二进制 SHA-256 校验通过。"
+        return 0
       fi
-    done
+      echo "⚠️ 节点二进制摘要不匹配，跳过该下载源。" >&2
+    fi
   done
   rm -f -- "$dest"
   echo "❌ 未取得通过摘要校验的节点二进制。" >&2

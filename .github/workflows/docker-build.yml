@@ -3,6 +3,7 @@ name: Verify and build release artifacts
 on:
   push:
     branches: ['**']
+    tags: ['2.0.7-beta-r[0-9]*']
     paths-ignore: ['docs/**', '**.md']
   pull_request:
     paths-ignore: ['docs/**', '**.md']
@@ -11,8 +12,9 @@ on:
 permissions:
   contents: read
 
-env:
-  VERSION: '2.0.7-beta'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   verify-java:
@@ -39,7 +41,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23.x'
+          go-version: '1.23.4'
           cache-dependency-path: |
             go-gost/go.sum
             go-gost/x/go.sum
@@ -55,7 +57,7 @@ jobs:
         run: |
           mkdir -p dist
           for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags '-s -w' -o "dist/gost-$arch" .
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -buildvcs=false -trimpath -ldflags '-s -w' -o "dist/gost-$arch" .
           done
           cd dist
           sha256sum gost-amd64 gost-arm64 > SHA256SUMS
@@ -74,42 +76,34 @@ jobs:
       - name: Check installer rollbacks and Compose configurations
         run: bash deploy/test-installers.sh
 
-  panel-changes:
-    # Test every branch and PR. Preserve the original two release branches for registry pushes.
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/port-traffic-ranking')
+  release-preflight:
+    if: github.repository == 'liang0222/flux-panel' && github.ref_type == 'tag' && startsWith(github.ref_name, '2.0.7-beta-r')
+    needs: [verify-java, verify-go, verify-deploy]
     runs-on: ubuntu-latest
-    outputs:
-      images: ${{ steps.check.outputs.images }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - id: check
-        shell: bash
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-linux-${{ github.sha }}
+          path: agent-dist
+      - name: Check tagged installer references and Agent assets
         env:
-          EVENT: ${{ github.event_name }}
-        run: |
-          images=()
-          base=$(git rev-parse --verify "refs/tags/${VERSION}^{commit}" 2>/dev/null || true)
-          for component in backend frontend; do
-            case "$component" in
-              backend) dir=springboot-backend ;;
-              frontend) dir=vite-frontend ;;
-            esac
-            if [[ "$EVENT" == workflow_dispatch || -z "$base" ]] || ! git diff --quiet "$base" HEAD -- "$dir/"; then
-              images+=("$component")
-            fi
-          done
-          python3 -c 'import json, sys; print("images=" + json.dumps(sys.argv[1:]))' "${images[@]}" >> "$GITHUB_OUTPUT"
+          VERSION: ${{ github.ref_name }}
+        run: python3 -I deploy/check-release.py "$VERSION" agent-dist
 
   publish-panel-images:
-    needs: [verify-java, verify-go, verify-deploy, panel-changes]
-    if: needs.panel-changes.outputs.images != '[]'
+    needs: release-preflight
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        component: ${{ fromJSON(needs.panel-changes.outputs.images) }}
+        include:
+          - component: backend
+            directory: springboot-backend
+          - component: frontend
+            directory: vite-frontend
     steps:
       - uses: actions/checkout@v4
         with:
@@ -120,16 +114,64 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
-      - name: Build and push panel image
+      - name: Publish and verify both Linux platforms for this image
         shell: bash
         env:
+          VERSION: ${{ github.ref_name }}
           COMPONENT: ${{ matrix.component }}
+          DIRECTORY: ${{ matrix.directory }}
         run: |
-          case "$COMPONENT" in
-            backend) dir=springboot-backend ;;
-            frontend) dir=vite-frontend ;;
-            *) exit 1 ;;
-          esac
+          image="docker.io/ahmadplayz721/flux-panel-${COMPONENT}:${VERSION}"
           docker buildx build --platform linux/amd64,linux/arm64 --push \
-            -t "ahmadplayz721/flux-panel-${COMPONENT}:latest" \
-            -t "ahmadplayz721/flux-panel-${COMPONENT}:${VERSION}" "./$dir"
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag "$image" "./$DIRECTORY"
+          docker buildx imagetools inspect "$image" --raw | jq -e '
+            [.manifests[].platform | select(.os == "linux").architecture] |
+            (index("amd64") != null and index("arm64") != null)'
+
+  publish-agent-release:
+    needs: publish-panel-images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-linux-${{ github.sha }}
+          path: agent-dist
+      - name: Create prerelease and confirm the published asset digests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$VERSION" --json tagName --jq '.tagName' >/dev/null; then
+            gh release create "$VERSION" --verify-tag --prerelease --draft \
+              --title "Flux Panel ${VERSION}" \
+              --notes 'Linux amd64/arm64. Upgrade the panel and verify it before upgrading the nodes.'
+          fi
+          release=$(gh release view "$VERSION" --json databaseId,isDraft,isPrerelease)
+          jq -e '.isPrerelease and (.databaseId > 0)' <<< "$release" >/dev/null
+          release_id=$(jq -r '.databaseId' <<< "$release")
+          is_draft=$(jq -r '.isDraft' <<< "$release")
+          asset_endpoint="repos/$GH_REPO/releases/$release_id/assets"
+          assets=$(gh api --paginate --slurp "$asset_endpoint")
+          for asset in gost-amd64 gost-arm64 SHA256SUMS; do
+            if [[ $is_draft == true ]] && ! jq -e --arg name "$asset" \
+                'any(.[][]; .name == $name)' <<< "$assets" >/dev/null; then
+              gh release upload "$VERSION" "agent-dist/$asset"
+            fi
+          done
+          assets=$(gh api --paginate --slurp "$asset_endpoint")
+          for asset in gost-amd64 gost-arm64 SHA256SUMS; do
+            digest=$(sha256sum "agent-dist/$asset" | cut -d' ' -f1)
+            if ! jq -e --arg name "$asset" --arg digest "sha256:$digest" \
+                'any(.[][]; .name == $name and .state == "uploaded" and .digest == $digest)' <<< "$assets" >/dev/null; then
+              echo "Missing or mismatched release asset: $asset" >&2
+              exit 1
+            fi
+          done
+          if [[ $is_draft == true ]]; then
+            gh release edit "$VERSION" --draft=false
+          fi
+          gh release view "$VERSION" --json isDraft,isPrerelease | jq -e '.isPrerelease and (.isDraft | not)'

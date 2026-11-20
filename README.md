@@ -39,123 +39,31 @@
 
 ## 部署流程
 
-> 如果 `raw.githubusercontent.com` 访问不了（国内常见），把命令里的 `https://raw.githubusercontent.com` 换成 `https://ghfast.top/https://raw.githubusercontent.com` 即可。
+面板镜像和 Linux 节点均使用 `2.0.7-beta-r1`，支持 `amd64` 和 `arm64`。已有部署请先备份配置和 SQLite，再升级面板并验证健康状态，最后分批升级节点。
 
 ### 面板端
 
+首次安装请在准备存放部署配置的空目录执行。升级时请在原 `docker-compose.yml` 和 `.env` 所在目录执行，并选择「更新」。
+
 ```bash
-curl -L https://raw.githubusercontent.com/liang0222/flux-panel/refs/tags/2.0.7-beta-perf/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/liang0222/flux-panel/refs/tags/2.0.7-beta-r1/panel_install.sh -o panel_install.sh && bash panel_install.sh
 ```
 
-脚本会下载本仓库的 `docker-compose-v4.yml` / `docker-compose-v6.yml`（使用 `ahmadplayz721/flux-panel-*` 镜像），
-按提示输入前端/后端端口后自动启动。默认前端 `6366`、后端 `6365`。
+- 默认通过本机 `http://127.0.0.1:6366` 访问面板。先通过本机或 SSH 转发完成首次登录并修改初始密码，再按需配置 HTTPS 反向代理。
+- 后端默认绑定 `127.0.0.1:6365`。独立节点需要从可信内网或 VPN 访问后端，按需调整监听地址和防火墙来源。当前节点安装器使用 HTTP 检查并接入后端。
+- 面板镜像为 `docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta-r1` 和 `docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta-r1`。手动 Compose 安装、IPv6、备份和回滚见[部署指南](deploy/README.md)。
 
 ### 节点端
 
-```bash
-curl -L https://raw.githubusercontent.com/liang0222/flux-panel/refs/tags/2.0.7-beta-perf/install.sh -o install.sh && chmod +x install.sh && ./install.sh
-```
-
-按提示填写「面板后端地址」（`公网IP:6365`）和「节点密钥」（面板「节点监控 → 添加节点」里获取）。
-节点二进制与上游 `2.0.7-beta` 一致，无需改动。
-
-> 也可以在面板里直接复制生成的安装命令，它会指向本仓库的 `install.sh`。
-
-**节点连不上？** 按顺序检查：
-
-1. 面板服务器安全组/防火墙放行 **后端端口（默认 6365/TCP）**，节点要能访问它；只开 6366（网页）不够。
-2. 「面板后端地址」必须是 `公网IP:6365`：不要带 `http://`、不要填网页端口、不要套 CDN。
-3. 在节点服务器执行 `curl http://面板IP:6365/flow/test`，应返回 `test`。
-4. 节点上查看服务：`systemctl status flux_agent`、`journalctl -u flux_agent -n 50 --no-pager`。
-5. 面板上查看日志：`docker logs springboot-backend | grep -E "节点|secret"`。
-6. 修改地址后重新安装：`./install.sh -a 面板IP:6365 -s 节点密钥`（安装脚本会自动做格式校验和连通性检测）。
-
-### 手动部署（可选，等价于上面脚本做的事）
-
-> 使用本仓库发布的镜像：`docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta`、`docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta`（amd64）。
-
-服务器上执行（需要 Docker 与 Compose 插件）：
+在节点服务器执行以下命令，按提示填写节点可达的后端 `主机:端口` 和「节点监控 → 添加节点」生成的节点密钥。面板中复制的节点安装命令也指向同一版本。
 
 ```bash
-mkdir -p /opt/flux-panel && cd /opt/flux-panel
-
-cat > .env <<ENVFILE
-JWT_SECRET=$(openssl rand -hex 16)
-FRONTEND_PORT=6366
-BACKEND_PORT=6365
-ENVFILE
-
-cat > docker-compose.yml <<COMPOSEFILE
-services:
-  backend:
-    image: docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta
-    container_name: springboot-backend
-    restart: unless-stopped
-    environment:
-      DB_PATH: /app/data/gost.db
-      JWT_SECRET: ${JWT_SECRET}
-      LOG_DIR: /app/logs
-      JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
-    ports:
-      - "${BACKEND_PORT:-6365}:6365"
-    volumes:
-      - sqlite_data:/app/data
-      - backend_logs:/app/logs
-    healthcheck:
-      test: ["CMD", "sh", "-c", "wget --no-verbose --tries=1 --spider http://localhost:6365/flow/test || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-
-  frontend:
-    image: docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta
-    container_name: vite-frontend
-    restart: unless-stopped
-    ports:
-      - "${FRONTEND_PORT:-6366}:80"
-    depends_on:
-      backend:
-        condition: service_healthy
-
-volumes:
-  sqlite_data:
-    name: sqlite_data
-  backend_logs:
-    name: backend_logs
-COMPOSEFILE
-
-docker compose pull
-docker compose up -d
-docker compose ps
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/liang0222/flux-panel/refs/tags/2.0.7-beta-r1/install.sh -o install.sh && bash install.sh
 ```
 
-访问 `http://服务器IP:6366`，默认账号见下方。
+安装器按架构下载 [GitHub Release](https://github.com/liang0222/flux-panel/releases/tag/2.0.7-beta-r1) 资产并校验固定 SHA-256。已有节点可用同一命令升级，安装器保留现有配置。
 
-安全组 / 防火墙需要放行：
-
-- `6366`：面板网页
-- `6365`：节点上报流量（节点服务器需要能访问）
-
-### 节点端
-
-节点二进制与上游 `2.0.7-beta` 一致，直接使用上游脚本安装：
-
-```bash
-curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
-```
-
-安装时按提示填写「面板后端地址」和「节点密钥」（可在面板「节点监控 → 添加节点」里获取；面板也会生成带 `-a`/`-s` 参数的完整命令，复制执行即可）。
-
-> 想完全自托管节点脚本：把 `install.sh` 里的下载地址换成你自己仓库的 Releases，并上传对应的 `gost-amd64` / `gost-arm64` 二进制。
-
-#### 默认管理员账号
-
-- **账号**: admin_user
-- **密码**: admin_user
-
-> ⚠️ 首次登录后请立即修改默认密码！
-
+节点连不上时，可从节点服务器访问 `http://<面板后端地址>:6365/flow/test`，确认返回 `test`。自定义后端端口请替换 `6365`。服务状态通过 `systemctl status flux_agent` 检查，近期日志通过 `journalctl -u flux_agent -n 50 --no-pager` 查看。
 
 ## 免责声明
 

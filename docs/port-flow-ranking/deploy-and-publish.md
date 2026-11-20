@@ -81,7 +81,7 @@ docker buildx build --platform linux/amd64 -t docker.io/<USER>/flux-panel-backen
 docker buildx build --platform linux/amd64 -t docker.io/<USER>/flux-panel-frontend:2.0.7-beta --push ./vite-frontend
 ```
 
-本项目已经构建并推送过一份可直接用的镜像（2026-10-24）：
+以下是 2026-10-24 推送的历史镜像。整改版本的安装入口以仓库首页为准：
 
 - `docker.io/ahmadplayz721/flux-panel-backend:2.0.7-beta`
 - `docker.io/ahmadplayz721/flux-panel-frontend:2.0.7-beta`
@@ -197,24 +197,21 @@ git commit -m "docs: 排行榜任务说明、部署与交接"
 ```bash
 git remote rename origin upstream
 git remote add origin git@github.com:<YOU>/flux-panel.git
-# 历史示例。该分支当前可触发镜像发布，单纯验证请用其他分支。
+# 分支推送用于验证，发布由独立版本标签触发。
 git push -u origin feat/port-traffic-ranking
 ```
 
 认证：SSH 公钥，或 HTTPS + PAT（勾 `repo`）。
 
-### 6.3 想推 main / tag
+### 6.3 版本发布与 README 切换
 
-```bash
-git push origin 2.0.7-beta:refs/tags/2.0.7-beta
-git push --all origin && git push --tags origin
-```
+1. 在发布候选提交上确认 README、面板安装器、Compose 默认镜像和面板内生成的节点安装命令使用同一版本。使用 [deploy/check-release.py](../../deploy/check-release.py) 核对构建产物、安装器和模板的 SHA-256。
+2. 在 `liang0222/flux-panel` 推送指向该提交的新版本标签，例如 `2.0.7-beta-r1`。在 GitHub Actions 查看对应标签运行，并确认前后端镜像均有 `linux/amd64` 和 `linux/arm64`，GitHub prerelease 的 `gost-amd64`、`gost-arm64` 和 `SHA256SUMS` 均已公开且校验匹配。
+3. 两类产物都验证成功后，再将含新版安装命令的提交更新到默认分支。保留历史标签供已有部署使用。若临时发布失败，先核对已产生的镜像和草稿 Release，再重跑同一标签上的失败任务。
 
 ### 6.4 当前 CI 与发布条件
 
-[.github/workflows/docker-build.yml](../../.github/workflows/docker-build.yml) 在各分支的代码变更推送、PR 和手动运行时执行 Maven `verify`、双 Go 模块竞态测试和安装器测试。Linux amd64/arm64 Agent 与 `SHA256SUMS` 上传为 Actions artifacts。仅 `main` 和 `feat/port-traffic-ranking` 的非 PR 运行进入面板镜像发布判定，且须通过前置验证。镜像目标为 `ahmadplayz721/flux-panel-*`，登录使用 `DOCKER_HUB_USERNAME` / `DOCKER_HUB_TOKEN`。该工作流不自动创建 Git tag 或 GitHub Release。
-
-如只需 CI 验证，可使用其他分支的 PR。分叉仓库需要单独检查镜像命名空间、版本 tag 和发布凭据。
+[.github/workflows/docker-build.yml](../../.github/workflows/docker-build.yml) 对各分支的代码变更推送、PR、标签和手动运行执行 Maven `verify`、双 Go 模块竞态测试和安装器测试。Linux amd64/arm64 Agent 与 `SHA256SUMS` 上传为 Actions artifacts。原仓库的 `2.0.7-beta-rN` 版本标签通过校验后，工作流使用 `DOCKER_HUB_USERNAME` / `DOCKER_HUB_TOKEN` 向 `ahmadplayz721/flux-panel-*` 推送同名版本镜像，其后校验 GitHub Release 资产并公开预发布。普通分支与 PR 只做验证。分叉仓库应独立配置镜像命名空间和发布凭据。
 
 ### 6.5 与上游同步
 
@@ -241,8 +238,8 @@ git fetch upstream && git checkout main && git merge upstream/main
 
 | 位置 | 当前行为 |
 | --- | --- |
-| [面板安装器](../../panel_install.sh) 与 [IPv4 模板](../../docker-compose-v4.yml)、[双栈模板](../../docker-compose-v6.yml) | 默认使用 `ahmadplayz721/flux-panel-*`，支持显式指定前后端镜像 |
-| [Agent 安装器](../../install.sh) | 使用现有带固定 SHA-256 的发布资产。发布新 Agent 时同步更新下载目标和各架构摘要 |
-| [节点安装命令](../../springboot-backend/src/main/java/com/admin/service/impl/NodeServiceImpl.java#L124) | 面板仍生成指向现有 `2.0.7-beta-perf` 标签的命令。本轮 Agent 发布后需同步更新引用 |
+| [面板安装器](../../panel_install.sh) 与 [IPv4 模板](../../docker-compose-v4.yml)、[双栈模板](../../docker-compose-v6.yml) | 默认选用 `ahmadplayz721/flux-panel-*:2.0.7-beta-r1`，也支持显式指定前后端镜像 |
+| [Agent 安装器](../../install.sh) | 选用 `2.0.7-beta-r1` 对应架构的发布资产并核对固定 SHA-256 |
+| [节点安装命令](../../springboot-backend/src/main/java/com/admin/service/impl/NodeServiceImpl.java#L124) | 面板生成指向 `2.0.7-beta-r1` 的安装命令，与 README 一致 |
 
 只升级面板时，旧 Agent 仍可兼容上报。批次去重、退出补发及 Agent 生命周期修复需要更新节点二进制。先升级并验证面板，再分批升级节点。
